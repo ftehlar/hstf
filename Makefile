@@ -2,29 +2,22 @@
 VPP_PKG_PATH?=~/vpp/build-root
 
 all:
-	@echo Targets:
-	@echo
-	@echo "build   - build docker image from deb packages"
-	@echo "run     - run previously build built image"
-	@echo "vppctl  - spawn vppctl for configuration"
-	@echo
+	@echo help
 
 build:
-	@echo DEB source path set to ${VPP_PKG_PATH}
-	cp ${VPP_PKG_PATH}/*.deb docker/dev/debs
-	docker build -t hs-build docker/dev
+	go build .
 
+build-docker:
+	@echo DEB source path set to ${VPP_PKG_PATH}
+	rm docker/dev/debs/*
+	cp ${VPP_PKG_PATH}/*.deb docker/dev/debs
+	cd docker/dev && docker build -t vpp1 -f Dockerfile.vpp1 .
+	cd docker/dev && docker build -t vpp2 -f Dockerfile.vpp2 .
+
+.PHONY: run
 run:
-	docker run --rm --name hsvpp -d hs-build
+	docker run --rm --name run_vpp1 -d vpp1
+	docker run --rm --name run_vpp2 -d vpp2
 
 vppctl:
 	docker exec -it hsvpp vppctl
-
-compose-build:
-	cd docker/dev && docker-compose build
-
-compose-run:
-	cd docker/dev && docker-compose up -d
-
-compose-down:
-	cd docker/dev && docker-compose down

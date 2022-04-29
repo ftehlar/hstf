@@ -1,0 +1,6 @@
+FROM hstf/vpp-base
+
+ADD startup_srv.conf /
+ADD srv.conf /
+
+CMD /usr/bin/vpp -c /startup_srv.conf

@@ -1,0 +1,6 @@
+FROM hstf/vpp-base
+
+ADD startup_cln.conf /
+ADD cln.conf /
+
+CMD /usr/bin/vpp -c /startup_cln.conf
