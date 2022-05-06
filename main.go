@@ -15,13 +15,24 @@ import (
 	"github.com/networkservicemesh/sdk/pkg/tools/log/logruslogger"
 
 	// "github.com/edwarnicke/exechelper"
-	// "github.com/vishvananda/netlink"
 	"github.com/edwarnicke/govpp/binapi/af_packet"
 	interfaces "github.com/edwarnicke/govpp/binapi/interface"
 	"github.com/edwarnicke/govpp/binapi/interface_types"
 	ip_types "github.com/edwarnicke/govpp/binapi/ip_types"
 	"github.com/edwarnicke/govpp/binapi/session"
 )
+
+type TcContext struct {
+	wg     *sync.WaitGroup
+	mainCh chan context.CancelFunc
+}
+
+type VppConfig struct {
+	ifName           string
+	interfaceAddress string
+	namespaceId      string
+	secret           uint64
+}
 
 func exitOnErrCh(ctx context.Context, cancel context.CancelFunc, errCh <-chan error) {
 	// If we already have an error, log it and exit
@@ -37,30 +48,6 @@ func exitOnErrCh(ctx context.Context, cancel context.CancelFunc, errCh <-chan er
 		cancel()
 	}(ctx, errCh)
 }
-
-/*
-func createAfPacket(ctx context.Context, vppConn api.Connection, link netlink.Link) (interface_types.InterfaceIndex, error) {
-	afPacketCreate := &af_packet.AfPacketCreate{
-		HwAddr:     types.ToVppMacAddress(&link.Attrs().HardwareAddr),
-		HostIfName: link.Attrs().Name,
-	}
-	now := time.Now()
-	afPacketCreateRsp, err := af_packet.NewServiceClient(vppConn).AfPacketCreate(ctx, afPacketCreate)
-	if err != nil {
-		return 0, err
-	}
-	log.FromContext(ctx).
-		WithField("swIfIndex", afPacketCreateRsp.SwIfIndex).
-		WithField("hwaddr", afPacketCreate.HwAddr).
-		WithField("hostIfName", afPacketCreate.HostIfName).
-		WithField("duration", time.Since(now)).
-		WithField("vppapi", "AfPacketCreate").Debug("completed")
-
-	if err := setMtu(ctx, vppConn, link, afPacketCreateRsp.SwIfIndex); err != nil {
-		return 0, err
-	}
-	return afPacketCreateRsp.SwIfIndex, nil
-}*/
 
 func addRunningConfig(ctx context.Context,
 	vppConn api.Connection,
@@ -118,7 +105,7 @@ func addRunningConfig(ctx context.Context,
 		IsEnable: true,
 	})
 	if er1 != nil {
-		log.FromContext(ctx).Fatal("session enable ", err)
+		log.FromContext(ctx).Fatalf("session enable %w", err)
 		return 0, err
 	}
 
@@ -149,24 +136,27 @@ func startServerApp() {
 	cmd.Env = newEnv
 	o, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Default().Fatalf("failed to start server app '%s'. Output %s", err, o)
+		log.Default().Errorf("failed to start server app '%s'. \n%s", err, o)
 	}
-	log.Default().Debugf("command ls finished: %s", o)
+	log.Default().Debugf("Server output: %s", o)
 }
 
 func startClientApp(finished chan struct{}) {
+	defer func() {
+		finished <- struct{}{}
+	}()
+
 	cmd := exec.Command("iperf3", "-c", "10.10.10.1", "-u", "-l", "1460", "-b", "10g")
 	newEnv := append(os.Environ(), addEnv, "VCL_CONFIG=vcl_cln.conf")
 	cmd.Env = newEnv
 	o, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Default().Fatalf("failed to start server app '%s'. Output %s", err, o)
+		log.Default().Errorf("failed to start client app '%s'.\n%s", err, o)
 	}
-	log.Default().Debugf("command ls finished: %s", o)
-	finished <- struct{}{}
+	log.Default().Debugf("Client output: %s", o)
 }
 
-func startVpp(wg *sync.WaitGroup, ifName, interfaceAddress, namespaceId string, secret uint64) {
+func startVpp(tc *TcContext, ifName, interfaceAddress, namespaceId string, secret uint64) {
 	ctx, cancel := signal.NotifyContext(
 		context.Background(),
 		os.Interrupt,
@@ -176,6 +166,8 @@ func startVpp(wg *sync.WaitGroup, ifName, interfaceAddress, namespaceId string, 
 		syscall.SIGQUIT,
 	)
 	defer cancel()
+
+	tc.mainCh <- cancel
 
 	path := fmt.Sprintf("/tmp/%s", ifName)
 	log.EnableTracing(true)
@@ -190,55 +182,137 @@ func startVpp(wg *sync.WaitGroup, ifName, interfaceAddress, namespaceId string, 
 
 	con, vppErrCh := vpphelper.StartAndDialContext(ctx, vpphelper.WithRootDir(path),
 		vpphelper.WithStanza(stanza.ToString()))
-	if con == nil {
-		fmt.Println("vpp connection is nil!")
-	}
+	exitOnErrCh(ctx, cancel, vppErrCh)
 
 	addRunningConfig(ctx, con, ifName, interfaceAddress, namespaceId, secret)
 
 	// 'notify' main thread that configuration is finished
-	wg.Done()
+	tc.wg.Done()
 
-	exitOnErrCh(ctx, cancel, vppErrCh)
-	// <-ctx.Done()
+	<-ctx.Done()
 	<-vppErrCh
 }
 
-type TcContext struct {
-	wg  *sync.WaitGroup
-	ctx context.Context
-}
-
-type VppConfig struct {
-	ifName           string
-	interfaceAddress string
-	namespaceId      string
-	secret           uint64
+// gather all cancel functions
+func receiveCancelFns(tc *TcContext, n int) []context.CancelFunc {
+	var res []context.CancelFunc
+	for i := 0; i < n; i++ {
+		res = append(res, <-tc.mainCh)
+	}
+	return res
 }
 
 // TODO: fix crash when linux topo isn't configured
 
-func main() {
-	// exechelper.Run("printenv", exechelper.WithStdout(os.Stdout))
-	// exechelper.Run("which vpp", exechelper.WithStdout(os.Stdout))
+type UninitFunc func()
+
+func configureTopo(peer1, peer2 string) ([]UninitFunc, error) {
+	var fns []UninitFunc
+	var peerIfNames []string
+	const brname = "hsbr"
+	const ns = "hsns"
+
+	peer12, err := AddVethPair(peer1)
+	if err != nil {
+		return fns, err
+	}
+	fns = append(fns, func() { DelLink(peer1) })
+
+	peer22, err := AddVethPair(peer2)
+	if err != nil {
+		return fns, err
+	}
+	fns = append(fns, func() { DelLink(peer2) })
+
+	peerIfNames = append(peerIfNames, peer12)
+	peerIfNames = append(peerIfNames, peer22)
+
+	err = AddNamespace(ns)
+	if err != nil {
+		return fns, err
+	}
+	err = LinkSetNamespace(peerIfNames[0], ns)
+	if err != nil {
+		return fns, err
+	}
+
+	// at this point we only need to delete namespace
+	fns = nil
+	fns = append(fns, func() { DelNamespace(ns) })
+
+	err = LinkSetNamespace(peerIfNames[1], ns)
+	if err != nil {
+		return fns, err
+	}
+
+	err = AddBridge(brname, peerIfNames, ns)
+	if err != nil {
+		return fns, err
+	}
+
+	return fns, nil
+}
+
+func cli(inst, command string) {
+	cmd := exec.Command("vppctl", "-s", fmt.Sprintf("/tmp/%s/var/run/vpp/cli.sock", inst), command)
+	o, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Default().Errorf("failed to execute command: '%s'.\n", err)
+	}
+	log.Default().Debugf("Command output %s", o)
+}
+
+func runTest() int {
+	var tc TcContext
+	tc.mainCh = make(chan context.CancelFunc)
 	var wg sync.WaitGroup
 	wg.Add(2)
+	tc.wg = &wg
 
 	finished := make(chan struct{})
 
-	// ctx1 := TcContext{}
-	// ctx1 := TcContext{}
 	log.Default().Debug("starting vpps")
-	go startVpp(&wg, "vpp1", "10.10.10.1/24", "1", 1)
-	go startVpp(&wg, "vpp2", "10.10.10.2/24", "2", 2)
+	go startVpp(&tc, "vppsrv", "10.10.10.1/24", "1", 1)
+	go startVpp(&tc, "vppcln", "10.10.10.2/24", "2", 2)
+
+	cancelFns := receiveCancelFns(&tc, 2)
 
 	// waiting for both vpps to finish configuration
 	wg.Wait()
 
+	cli("vppsrv", "show int")
 	log.Default().Debug("attaching clients")
 
 	go startServerApp()
 	go startClientApp(finished)
 	<-finished
+
+	// stop vpp routines
+	for _, fn := range cancelFns {
+		fn()
+	}
+	return 0
+}
+
+func testLDPreloadIperf() int {
+	// exechelper.Run("printenv", exechelper.WithStdout(os.Stdout))
+	// exechelper.Run("which vpp", exechelper.WithStdout(os.Stdout))
+	unconfigFns, err := configureTopo("vppsrv", "vppcln")
+	for _, v := range unconfigFns {
+		defer v()
+	}
+
+	if err != nil {
+		fmt.Printf("%s\n", err)
+		return 1
+	}
+
+	rc := runTest()
+
 	log.Default().Debug("Test case finished.")
+	return rc
+}
+
+func main() {
+	os.Exit(testLDPreloadIperf())
 }

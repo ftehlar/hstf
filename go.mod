@@ -6,7 +6,7 @@ require (
 	git.fd.io/govpp.git v0.4.0
 	github.com/edwarnicke/govpp v0.0.0-20220311182453-f32f292e0e91
 	github.com/edwarnicke/vpphelper v0.0.0-20210617172001-3e6797de32c3
-	github.com/networkservicemesh/sdk v1.3.0
+	github.com/networkservicemesh/sdk v1.3.1
 )
 
 require (
@@ -40,7 +40,7 @@ require (
 	golang.org/x/net v0.0.0-20211112202133-69e39bad7dc2 // indirect
 	golang.org/x/sys v0.0.0-20220307203707-22a9840ba4d7 // indirect
 	golang.org/x/text v0.3.7 // indirect
-	google.golang.org/genproto v0.0.0-20200806141610-86f49bd18e98 // indirect
+	google.golang.org/genproto v0.0.0-20211129164237-f09f9a12af12 // indirect
 	google.golang.org/grpc v1.42.0 // indirect
 	google.golang.org/protobuf v1.27.1 // indirect
 	gopkg.in/fsnotify.v1 v1.4.7 // indirect
