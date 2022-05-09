@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 
@@ -130,10 +131,11 @@ func addRunningConfig(ctx context.Context,
 
 var addEnv string = "LD_PRELOAD=/home/vagrant/vpp/build-root/build-vpp_debug-native/vpp/lib/x86_64-linux-gnu/libvcl_ldpreload.so"
 
-func startServerApp() {
+func startServerApp(env []string) {
 	cmd := exec.Command("iperf3", "-4", "-s")
-	newEnv := append(os.Environ(), addEnv, "VCL_CONFIG=vcl_srv.conf")
-	cmd.Env = newEnv
+	if env != nil {
+		cmd.Env = env
+	}
 	o, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Default().Errorf("failed to start server app '%s'. \n%s", err, o)
@@ -141,14 +143,15 @@ func startServerApp() {
 	log.Default().Debugf("Server output: %s", o)
 }
 
-func startClientApp(finished chan struct{}) {
+func startClientApp(env []string, finished chan struct{}) {
 	defer func() {
 		finished <- struct{}{}
 	}()
 
 	cmd := exec.Command("iperf3", "-c", "10.10.10.1", "-u", "-l", "1460", "-b", "10g")
-	newEnv := append(os.Environ(), addEnv, "VCL_CONFIG=vcl_cln.conf")
-	cmd.Env = newEnv
+	if env != nil {
+		cmd.Env = env
+	}
 	o, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Default().Errorf("failed to start client app '%s'.\n%s", err, o)
@@ -262,7 +265,7 @@ func cli(inst, command string) {
 	log.Default().Debugf("Command output %s", o)
 }
 
-func runTest() int {
+func runLDPreloadVpp() int {
 	var tc TcContext
 	tc.mainCh = make(chan context.CancelFunc)
 	var wg sync.WaitGroup
@@ -283,8 +286,11 @@ func runTest() int {
 	cli("vppsrv", "show int")
 	log.Default().Debug("attaching clients")
 
-	go startServerApp()
-	go startClientApp(finished)
+	srvEnv := append(os.Environ(), addEnv, "VCL_CONFIG=vcl_srv.conf")
+	go startServerApp(srvEnv)
+
+	clnEnv := append(os.Environ(), addEnv, "VCL_CONFIG=vcl_cln.conf")
+	go startClientApp(clnEnv, finished)
 	<-finished
 
 	// stop vpp routines
@@ -294,7 +300,16 @@ func runTest() int {
 	return 0
 }
 
-func testLDPreloadIperf() int {
+func runLDPreloadLinux() int {
+	finished := make(chan struct{})
+
+	go startServerApp(nil)
+	go startClientApp(nil, finished)
+	<-finished
+	return 0
+}
+
+func testLDPreloadIperfVpp() int {
 	// exechelper.Run("printenv", exechelper.WithStdout(os.Stdout))
 	// exechelper.Run("which vpp", exechelper.WithStdout(os.Stdout))
 	unconfigFns, err := configureTopo("vppsrv", "vppcln")
@@ -307,12 +322,78 @@ func testLDPreloadIperf() int {
 		return 1
 	}
 
-	rc := runTest()
+	rc := runLDPreloadVpp()
 
 	log.Default().Debug("Test case finished.")
 	return rc
 }
 
+func testLDPreloadIperfLinux() int {
+	unconfigFns, err := configureTopo("vppsrv", "vppcln")
+	for _, v := range unconfigFns {
+		defer v()
+	}
+
+	if err != nil {
+		fmt.Printf("%s\n", err)
+		return 1
+	}
+
+	const tapName = "tap0"
+	err = AddTap(tapName, "10.10.10.1/24")
+	if err != nil {
+		fmt.Printf("%s\n", err)
+		return 1
+	}
+	defer DelLink(tapName)
+
+	rc := runLDPreloadLinux()
+
+	log.Default().Debug("Test case finished.")
+	return rc
+}
+
+type TestFn func() int
+
+type Test struct {
+	fn   TestFn
+	desc string
+}
+
+var tests []Test
+
+func registerTestCase(fn TestFn, desc string) {
+	tests = append(tests, Test{fn, desc})
+}
+
+func registerTests() {
+	registerTestCase(testLDPreloadIperfVpp, "LD preload iperf (VPP)")
+	registerTestCase(testLDPreloadIperfLinux, "LD preload iperf (Linux)")
+}
+
+func printHelp() {
+	fmt.Println("usage sudo ./hstf <test-number>")
+	for i, v := range tests {
+		fmt.Printf(" %d : %s\n", i, v.desc)
+	}
+}
+
 func main() {
-	os.Exit(testLDPreloadIperf())
+	registerTests()
+
+	argLength := len(os.Args[1:])
+	if argLength < 1 {
+		fmt.Println("arg required")
+		printHelp()
+		os.Exit(1)
+	}
+
+	index, err := strconv.Atoi(os.Args[1])
+	if err != nil {
+		fmt.Println("arg not a number")
+		printHelp()
+		os.Exit(1)
+	}
+
+	os.Exit(tests[index].fn())
 }

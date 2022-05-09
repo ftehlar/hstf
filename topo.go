@@ -6,6 +6,30 @@ import (
 	"os/exec"
 )
 
+func AddTap(ifName, ifAddress string) error {
+	cmd := exec.Command("ip", "tuntap", "add", ifName, "mode", "tap")
+	err := cmd.Run()
+	if err != nil {
+		s := fmt.Sprintf("error creating tap %s!", ifName)
+		return errors.New(s)
+	}
+
+	cmd = exec.Command("ip", "addr", "add", ifAddress, "dev", ifName)
+	err = cmd.Run()
+	if err != nil {
+		DelLink(ifName)
+		s := fmt.Sprintf("error setting addr for tap %s!", ifName)
+		return errors.New(s)
+	}
+
+	err = SetDevUp(ifName, "")
+	if err != nil {
+		DelLink(ifName)
+		return err
+	}
+	return nil
+}
+
 func DelLink(ifName string) {
 	cmd := exec.Command("ip", "link", "del", ifName)
 	cmd.Run()
