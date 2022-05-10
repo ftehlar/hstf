@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -50,67 +51,65 @@ func exitOnErrCh(ctx context.Context, cancel context.CancelFunc, errCh <-chan er
 	}(ctx, errCh)
 }
 
-func addRunningConfig(ctx context.Context,
-	vppConn api.Connection,
-	ifName, interfaceAddress, namespaceId string,
-	secret uint64) (interface_types.InterfaceIndex, error) {
+func configureLDPtest(ifName, interfaceAddress, namespaceId string, secret uint64) ConfFn {
+	return func(ctx context.Context,
+		vppConn api.Connection) error {
+		ifaceClient := interfaces.NewServiceClient(vppConn)
+		afPacketCreate := &af_packet.AfPacketCreateV2{
+			UseRandomHwAddr: true,
+			HostIfName:      ifName,
+			NumRxQueues:     1,
+		}
+		afPacketCreateRsp, err := af_packet.NewServiceClient(vppConn).AfPacketCreateV2(ctx, afPacketCreate)
+		if err != nil {
+			log.FromContext(ctx).Fatal("failed to create af packet: ", err)
+			return err
+		}
+		_, err = ifaceClient.SwInterfaceSetFlags(ctx, &interfaces.SwInterfaceSetFlags{
+			SwIfIndex: afPacketCreateRsp.SwIfIndex,
+			Flags:     interface_types.IF_STATUS_API_FLAG_ADMIN_UP,
+		})
+		if err != nil {
+			log.FromContext(ctx).Fatal("set interface table ", err)
+			return err
+		}
 
-	ifaceClient := interfaces.NewServiceClient(vppConn)
-	afPacketCreate := &af_packet.AfPacketCreateV2{
-		UseRandomHwAddr: true,
-		HostIfName:      ifName,
-		NumRxQueues:     1,
-	}
-	afPacketCreateRsp, err := af_packet.NewServiceClient(vppConn).AfPacketCreateV2(ctx, afPacketCreate)
-	if err != nil {
-		log.FromContext(ctx).Fatal("failed to create af packet: ", err)
-		return 0, err
-	}
-	_, err = ifaceClient.SwInterfaceSetFlags(ctx, &interfaces.SwInterfaceSetFlags{
-		SwIfIndex: afPacketCreateRsp.SwIfIndex,
-		Flags:     interface_types.IF_STATUS_API_FLAG_ADMIN_UP,
-	})
-	if err != nil {
-		log.FromContext(ctx).Fatal("set interface table ", err)
-		return 0, err
-	}
+		ipPrefix, err := ip_types.ParseAddressWithPrefix(interfaceAddress)
+		if err != nil {
+			log.FromContext(ctx).Fatal("parse ip address ", err)
+			return err
+		}
 
-	ipPrefix, err := ip_types.ParseAddressWithPrefix(interfaceAddress)
-	if err != nil {
-		log.FromContext(ctx).Fatal("parse ip address ", err)
-		return 0, err
-	}
+		ipAddress := &interfaces.SwInterfaceAddDelAddress{
+			IsAdd:     true,
+			SwIfIndex: afPacketCreateRsp.SwIfIndex,
+			Prefix:    ipPrefix,
+		}
+		_, errx := ifaceClient.SwInterfaceAddDelAddress(ctx, ipAddress)
+		if errx != nil {
+			log.FromContext(ctx).Fatal("add ip address ", err)
+			return err
+		}
 
-	ipAddress := &interfaces.SwInterfaceAddDelAddress{
-		IsAdd:     true,
-		SwIfIndex: afPacketCreateRsp.SwIfIndex,
-		Prefix:    ipPrefix,
-	}
-	_, errx := ifaceClient.SwInterfaceAddDelAddress(ctx, ipAddress)
-	if errx != nil {
-		log.FromContext(ctx).Fatal("add ip address ", err)
-		return 0, err
-	}
+		_, er := session.NewServiceClient(vppConn).AppNamespaceAddDelV2(ctx, &session.AppNamespaceAddDelV2{
+			Secret:      secret,
+			SwIfIndex:   afPacketCreateRsp.SwIfIndex,
+			NamespaceID: namespaceId,
+		})
+		if er != nil {
+			log.FromContext(ctx).Fatal("add app namespace ", err)
+			return err
+		}
 
-	_, er := session.NewServiceClient(vppConn).AppNamespaceAddDelV2(ctx, &session.AppNamespaceAddDelV2{
-		Secret:      secret,
-		SwIfIndex:   afPacketCreateRsp.SwIfIndex,
-		NamespaceID: namespaceId,
-	})
-	if er != nil {
-		log.FromContext(ctx).Fatal("add app namespace ", err)
-		return 0, err
+		_, er1 := session.NewServiceClient(vppConn).SessionEnableDisable(ctx, &session.SessionEnableDisable{
+			IsEnable: true,
+		})
+		if er1 != nil {
+			log.FromContext(ctx).Fatalf("session enable %w", err)
+			return err
+		}
+		return nil
 	}
-
-	_, er1 := session.NewServiceClient(vppConn).SessionEnableDisable(ctx, &session.SessionEnableDisable{
-		IsEnable: true,
-	})
-	if er1 != nil {
-		log.FromContext(ctx).Fatalf("session enable %w", err)
-		return 0, err
-	}
-
-	return afPacketCreateRsp.SwIfIndex, nil
 }
 
 /* func createtempDir() string {
@@ -159,7 +158,10 @@ func startClientApp(env []string, finished chan struct{}) {
 	log.Default().Debugf("Client output: %s", o)
 }
 
-func startVpp(tc *TcContext, ifName, interfaceAddress, namespaceId string, secret uint64) {
+type ConfFn func(context.Context, api.Connection) error
+
+// func startVpp(tc *TcContext, ifName, interfaceAddress, namespaceId string, secret uint64) {
+func startVpp(tc *TcContext, instance string, startupCofnig *Stanza, confFn ConfFn) {
 	ctx, cancel := signal.NotifyContext(
 		context.Background(),
 		os.Interrupt,
@@ -172,22 +174,18 @@ func startVpp(tc *TcContext, ifName, interfaceAddress, namespaceId string, secre
 
 	tc.mainCh <- cancel
 
-	path := fmt.Sprintf("/tmp/%s", ifName)
+	path := fmt.Sprintf("/tmp/%s", instance)
 	log.EnableTracing(true)
 	ctx = log.WithLog(ctx, logruslogger.New(ctx, map[string]interface{}{"cmd": os.Args[0]}))
 
-	var stanza Stanza
-	stanza.
-		NewStanza("session").
-		Append("enable").
-		Append("use-app-socket-api").Close()
-	fmt.Println(stanza.ToString())
-
 	con, vppErrCh := vpphelper.StartAndDialContext(ctx, vpphelper.WithRootDir(path),
-		vpphelper.WithStanza(stanza.ToString()))
+		vpphelper.WithStanza(startupCofnig.ToString()))
 	exitOnErrCh(ctx, cancel, vppErrCh)
 
-	addRunningConfig(ctx, con, ifName, interfaceAddress, namespaceId, secret)
+	err := confFn(ctx, con)
+	if err != nil {
+		log.FromContext(ctx).Errorf("configuration failed: %s", err)
+	}
 
 	// 'notify' main thread that configuration is finished
 	tc.wg.Done()
@@ -265,23 +263,33 @@ func cli(inst, command string) {
 	log.Default().Debugf("Command output %s", o)
 }
 
-func runLDPreloadVpp() int {
-	var tc TcContext
-	tc.mainCh = make(chan context.CancelFunc)
+func (tc *TcContext) init(nInst int) {
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(nInst)
 	tc.wg = &wg
+	tc.mainCh = make(chan context.CancelFunc)
+}
+
+func runLDPreloadVpp() error {
+	var tc TcContext
+	tc.init(2)
 
 	finished := make(chan struct{})
 
+	var startup Stanza
+	startup.
+		NewStanza("session").
+		Append("enable").
+		Append("use-app-socket-api").Close()
+
 	log.Default().Debug("starting vpps")
-	go startVpp(&tc, "vppsrv", "10.10.10.1/24", "1", 1)
-	go startVpp(&tc, "vppcln", "10.10.10.2/24", "2", 2)
+	go startVpp(&tc, "vppsrv", &startup, configureLDPtest("vppsrv", "10.10.10.1/24", "1", 1))
+	go startVpp(&tc, "vppcln", &startup, configureLDPtest("vppcln", "10.10.10.2/24", "2", 2))
 
 	cancelFns := receiveCancelFns(&tc, 2)
 
 	// waiting for both vpps to finish configuration
-	wg.Wait()
+	tc.wg.Wait()
 
 	cli("vppsrv", "show int")
 	log.Default().Debug("attaching clients")
@@ -297,19 +305,19 @@ func runLDPreloadVpp() int {
 	for _, fn := range cancelFns {
 		fn()
 	}
-	return 0
+	return nil
 }
 
-func runLDPreloadLinux() int {
+func runLDPreloadLinux() error {
 	finished := make(chan struct{})
 
 	go startServerApp(nil)
 	go startClientApp(nil, finished)
 	<-finished
-	return 0
+	return nil
 }
 
-func testLDPreloadIperfVpp() int {
+func testLDPreloadIperfVpp() error {
 	// exechelper.Run("printenv", exechelper.WithStdout(os.Stdout))
 	// exechelper.Run("which vpp", exechelper.WithStdout(os.Stdout))
 	unconfigFns, err := configureTopo("vppsrv", "vppcln")
@@ -319,41 +327,95 @@ func testLDPreloadIperfVpp() int {
 
 	if err != nil {
 		fmt.Printf("%s\n", err)
-		return 1
+		return errors.New("error configuring network")
 	}
 
-	rc := runLDPreloadVpp()
+	err = runLDPreloadVpp()
 
 	log.Default().Debug("Test case finished.")
-	return rc
+	return err
 }
 
-func testLDPreloadIperfLinux() int {
+func testLDPreloadIperfLinux() error {
 	unconfigFns, err := configureTopo("vppsrv", "vppcln")
 	for _, v := range unconfigFns {
 		defer v()
 	}
 
 	if err != nil {
-		fmt.Printf("%s\n", err)
-		return 1
+		return err
 	}
 
 	const tapName = "tap0"
 	err = AddTap(tapName, "10.10.10.1/24")
 	if err != nil {
-		fmt.Printf("%s\n", err)
-		return 1
+		return err
 	}
 	defer DelLink(tapName)
 
-	rc := runLDPreloadLinux()
+	err = runLDPreloadLinux()
 
 	log.Default().Debug("Test case finished.")
-	return rc
+	return err
 }
 
-type TestFn func() int
+func configureHttpTps(inst, server_ip, port string) ConfFn {
+	return func(ctx context.Context,
+		vppConn api.Connection) error {
+		client_ip4 := "172.0.0.2"
+		_, err := session.NewServiceClient(vppConn).SessionEnableDisable(ctx, &session.SessionEnableDisable{
+			IsEnable: true,
+		})
+		if err != nil {
+			return err
+		}
+		cli("vpp-tps", "create tap id 0 host-ip4-addr "+client_ip4+"/24")
+		cli("vpp-tps", "set int ip addr tap0 "+server_ip+"/24")
+		cli("vpp-tps", "set int state tap0 up")
+		cli("vpp-tps", "http tps uri tcp://0.0.0.0/"+port)
+		return nil
+	}
+}
+
+func startCurl(finished chan struct{}, server_ip, port string) {
+	// TODO type should be chan error
+	defer func() {
+		finished <- struct{}{}
+	}()
+
+	cmd := exec.Command("curl", "--output", "-", server_ip+":"+port+"/test_file_10M")
+	o, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Default().Errorf("failed to start curl '%s'.\n%s", err, o)
+	}
+	log.Default().Debugf("Client output: %s", o)
+}
+
+func testHttpTps() error {
+	finished := make(chan struct{})
+	var tc TcContext
+	tc.init(1)
+	server_ip := "172.0.0.1"
+	port := "8080"
+
+	log.Default().Debug("starting vpp..")
+	go startVpp(&tc, "vpp-tps", &Stanza{}, configureHttpTps("vpp-tps", server_ip, port))
+	cancelFns := receiveCancelFns(&tc, 1)
+
+	tc.wg.Wait()
+
+	go startCurl(finished, server_ip, port)
+	// wait for client
+	<-finished
+
+	for _, fn := range cancelFns {
+		fn()
+	}
+
+	return nil
+}
+
+type TestFn func() error
 
 type Test struct {
 	fn   TestFn
@@ -369,6 +431,7 @@ func registerTestCase(fn TestFn, desc string) {
 func registerTests() {
 	registerTestCase(testLDPreloadIperfVpp, "LD preload iperf (VPP)")
 	registerTestCase(testLDPreloadIperfLinux, "LD preload iperf (Linux)")
+	registerTestCase(testHttpTps, "HTTP tps test")
 }
 
 func printHelp() {
@@ -379,6 +442,8 @@ func printHelp() {
 }
 
 func main() {
+	rc := 0
+
 	registerTests()
 
 	argLength := len(os.Args[1:])
@@ -395,5 +460,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	os.Exit(tests[index].fn())
+	err = tests[index].fn()
+	if err != nil {
+		fmt.Printf("%s\n", err)
+		rc = 1
+	}
+	os.Exit(rc)
 }
