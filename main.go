@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
 	"git.fd.io/govpp.git/api"
 	"github.com/edwarnicke/vpphelper"
@@ -130,16 +131,17 @@ func configureLDPtest(ifName, interfaceAddress, namespaceId string, secret uint6
 
 var addEnv string = "LD_PRELOAD=/home/vagrant/vpp/build-root/build-vpp_debug-native/vpp/lib/x86_64-linux-gnu/libvcl_ldpreload.so"
 
-func startServerApp(env []string) {
+func startServerApp(done chan struct{}, env []string) {
 	cmd := exec.Command("iperf3", "-4", "-s")
 	if env != nil {
 		cmd.Env = env
 	}
-	o, err := cmd.CombinedOutput()
+	err := cmd.Start()
 	if err != nil {
-		log.Default().Errorf("failed to start server app '%s'. \n%s", err, o)
+		log.Default().Errorf("failed to start server app: '%s'\n", err)
 	}
-	log.Default().Debugf("Server output: %s", o)
+	<-done
+	cmd.Process.Kill()
 }
 
 func startClientApp(env []string, finished chan struct{}) {
@@ -147,15 +149,26 @@ func startClientApp(env []string, finished chan struct{}) {
 		finished <- struct{}{}
 	}()
 
-	cmd := exec.Command("iperf3", "-c", "10.10.10.1", "-u", "-l", "1460", "-b", "10g")
-	if env != nil {
-		cmd.Env = env
+	nTries := 0
+
+	for {
+		cmd := exec.Command("iperf3", "-c", "10.10.10.1", "-u", "-l", "1460", "-b", "10g")
+		if env != nil {
+			cmd.Env = env
+		}
+		o, err := cmd.CombinedOutput()
+		if err != nil {
+			if nTries > 5 {
+				log.Default().Errorf("failed to start client app '%s'.\n%s", err, o)
+				return
+			}
+			time.Sleep(1 * time.Second)
+			nTries++
+			continue
+		}
+		log.Default().Debugf("Client output: %s", o)
+		break
 	}
-	o, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Default().Errorf("failed to start client app '%s'.\n%s", err, o)
-	}
-	log.Default().Debugf("Client output: %s", o)
 }
 
 type ConfFn func(context.Context, api.Connection) error
@@ -273,8 +286,9 @@ func (tc *TcContext) init(nInst int) {
 func runLDPreloadVpp() error {
 	var tc TcContext
 	tc.init(2)
+	stopServerCh := make(chan struct{}, 1)
 
-	finished := make(chan struct{})
+	tcFinished := make(chan struct{})
 
 	var startup Stanza
 	startup.
@@ -295,11 +309,16 @@ func runLDPreloadVpp() error {
 	log.Default().Debug("attaching clients")
 
 	srvEnv := append(os.Environ(), addEnv, "VCL_CONFIG=vcl_srv.conf")
-	go startServerApp(srvEnv)
+	go startServerApp(stopServerCh, srvEnv)
 
 	clnEnv := append(os.Environ(), addEnv, "VCL_CONFIG=vcl_cln.conf")
-	go startClientApp(clnEnv, finished)
-	<-finished
+	go startClientApp(clnEnv, tcFinished)
+
+	// wait for client
+	<-tcFinished
+
+	// stop server
+	stopServerCh <- struct{}{}
 
 	// stop vpp routines
 	for _, fn := range cancelFns {
@@ -309,11 +328,15 @@ func runLDPreloadVpp() error {
 }
 
 func runLDPreloadLinux() error {
-	finished := make(chan struct{})
+	tcFinished := make(chan struct{})
+	stopServerCh := make(chan struct{})
 
-	go startServerApp(nil)
-	go startClientApp(nil, finished)
-	<-finished
+	go startServerApp(stopServerCh, nil)
+	go startClientApp(nil, tcFinished)
+
+	<-tcFinished
+	stopServerCh <- struct{}{}
+
 	return nil
 }
 
@@ -377,10 +400,9 @@ func configureHttpTps(inst, server_ip, port string) ConfFn {
 	}
 }
 
-func startCurl(finished chan struct{}, server_ip, port string) {
-	// TODO type should be chan error
+func startCurl(finished chan error, server_ip, port string) {
 	defer func() {
-		finished <- struct{}{}
+		finished <- errors.New("curl error")
 	}()
 
 	cmd := exec.Command("curl", "--output", "-", server_ip+":"+port+"/test_file_10M")
@@ -389,10 +411,12 @@ func startCurl(finished chan struct{}, server_ip, port string) {
 		log.Default().Errorf("failed to start curl '%s'.\n%s", err, o)
 	}
 	log.Default().Debugf("Client output: %s", o)
+	finished <- nil
 }
 
 func testHttpTps() error {
-	finished := make(chan struct{})
+	finished := make(chan error, 1)
+	var rc error
 	var tc TcContext
 	tc.init(1)
 	server_ip := "172.0.0.1"
@@ -406,13 +430,16 @@ func testHttpTps() error {
 
 	go startCurl(finished, server_ip, port)
 	// wait for client
-	<-finished
+	err := <-finished
+	if err != nil {
+		rc = err
+	}
 
 	for _, fn := range cancelFns {
 		fn()
 	}
 
-	return nil
+	return rc
 }
 
 type TestFn func() error
