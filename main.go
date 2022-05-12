@@ -450,12 +450,13 @@ type TestFn func() error
 type Test struct {
 	fn   TestFn
 	desc string
+	err  error
 }
 
 var tests []Test
 
 func registerTestCase(fn TestFn, desc string) {
-	tests = append(tests, Test{fn, desc})
+	tests = append(tests, Test{fn, desc, nil})
 }
 
 func registerTests() {
@@ -471,6 +472,36 @@ func printHelp() {
 	}
 }
 
+func runAll(tests []Test) {
+	for _, tc := range tests {
+		tc.err = tc.fn()
+	}
+	printResults(tests)
+}
+
+func getResultString(tc *Test) (bool, string) {
+	if tc.err == nil {
+		return true, "passed"
+	}
+	return false, "failed"
+}
+
+func printResults(tests []Test) {
+	colorReset := "\033[0m"
+	colorRed := "\033[31m"
+	colorGreen := "\033[32m"
+	color := colorGreen
+
+	fmt.Println("\nResults:")
+	for i, tc := range tests {
+		res, str := getResultString(&tc)
+		if !res {
+			color = colorRed
+		}
+		fmt.Printf("%d. %s%s%s\t%s\n", i, string(color), str, string(colorReset), tc.desc)
+	}
+}
+
 func main() {
 	rc := 0
 
@@ -483,17 +514,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	index, err := strconv.Atoi(os.Args[1])
-	if err != nil {
-		fmt.Println("arg not a number")
-		printHelp()
-		os.Exit(1)
-	}
+	if os.Args[1] == "all" {
+		runAll(tests)
+	} else {
+		index, err := strconv.Atoi(os.Args[1])
+		if err != nil {
+			fmt.Println("arg not a number")
+			printHelp()
+			os.Exit(1)
+		}
 
-	err = tests[index].fn()
-	if err != nil {
-		fmt.Printf("%s\n", err)
-		rc = 1
+		err = tests[index].fn()
+		if err != nil {
+			fmt.Printf("%s\n", err)
+			rc = 1
+		}
 	}
 	os.Exit(rc)
 }
