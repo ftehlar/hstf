@@ -400,17 +400,20 @@ func configureHttpTps(inst, server_ip, port string) ConfFn {
 	}
 }
 
-func startCurl(finished chan error, server_ip, port string) {
+func startWget(finished chan error, server_ip, port string) {
+	fname := "test_file_10M"
 	defer func() {
-		finished <- errors.New("curl error")
+		finished <- errors.New("wget error")
 	}()
 
-	cmd := exec.Command("curl", "--output", "-", server_ip+":"+port+"/test_file_10M")
+	cmd := exec.Command("wget", server_ip+":"+port+"/"+fname)
 	o, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Default().Errorf("failed to start curl '%s'.\n%s", err, o)
+		log.Default().Errorf("wget error: '%s'.\n%s", err, o)
+		return
 	}
 	log.Default().Debugf("Client output: %s", o)
+	os.Remove(fname)
 	finished <- nil
 }
 
@@ -428,7 +431,7 @@ func testHttpTps() error {
 
 	tc.wg.Wait()
 
-	go startCurl(finished, server_ip, port)
+	go startWget(finished, server_ip, port)
 	// wait for client
 	err := <-finished
 	if err != nil {
