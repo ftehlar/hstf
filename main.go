@@ -131,7 +131,7 @@ func configureLDPtest(ifName, interfaceAddress, namespaceId string, secret uint6
 
 var addEnv string = "LD_PRELOAD=/home/vagrant/vpp/build-root/build-vpp_debug-native/vpp/lib/x86_64-linux-gnu/libvcl_ldpreload.so"
 
-func startServerApp(done chan struct{}, env []string) {
+func startServerApp(running chan struct{}, done chan struct{}, env []string) {
 	cmd := exec.Command("iperf3", "-4", "-s")
 	if env != nil {
 		cmd.Env = env
@@ -140,6 +140,7 @@ func startServerApp(done chan struct{}, env []string) {
 	if err != nil {
 		log.Default().Errorf("failed to start server app: '%s'\n", err)
 	}
+	running <- struct{}{}
 	<-done
 	cmd.Process.Kill()
 }
@@ -173,7 +174,6 @@ func startClientApp(env []string, finished chan struct{}) {
 
 type ConfFn func(context.Context, api.Connection) error
 
-// func startVpp(tc *TcContext, ifName, interfaceAddress, namespaceId string, secret uint64) {
 func startVpp(tc *TcContext, instance string, startupCofnig *Stanza, confFn ConfFn) {
 	ctx, cancel := signal.NotifyContext(
 		context.Background(),
@@ -287,6 +287,7 @@ func runLDPreloadVpp() error {
 	var tc TcContext
 	tc.init(2)
 	stopServerCh := make(chan struct{}, 1)
+	serverRunning := make(chan struct{}, 1)
 
 	tcFinished := make(chan struct{})
 
@@ -309,7 +310,9 @@ func runLDPreloadVpp() error {
 	log.Default().Debug("attaching clients")
 
 	srvEnv := append(os.Environ(), addEnv, "VCL_CONFIG=vcl_srv.conf")
-	go startServerApp(stopServerCh, srvEnv)
+	go startServerApp(serverRunning, stopServerCh, srvEnv)
+
+	<-serverRunning
 
 	clnEnv := append(os.Environ(), addEnv, "VCL_CONFIG=vcl_cln.conf")
 	go startClientApp(clnEnv, tcFinished)
@@ -327,7 +330,7 @@ func runLDPreloadVpp() error {
 	return nil
 }
 
-func runLDPreloadLinux() error {
+func runIperfLinux() error {
 	tcFinished := make(chan struct{})
 	stopServerCh := make(chan struct{})
 
@@ -359,7 +362,7 @@ func testLDPreloadIperfVpp() error {
 	return err
 }
 
-func testLDPreloadIperfLinux() error {
+func testIperfLinux() error {
 	unconfigFns, err := configureTopo("vppsrv", "vppcln")
 	for _, v := range unconfigFns {
 		defer v()
@@ -376,7 +379,7 @@ func testLDPreloadIperfLinux() error {
 	}
 	defer DelLink(tapName)
 
-	err = runLDPreloadLinux()
+	err = runIperfLinux()
 
 	log.Default().Debug("Test case finished.")
 	return err
@@ -406,14 +409,13 @@ func startWget(finished chan error, server_ip, port string) {
 		finished <- errors.New("wget error")
 	}()
 
-	cmd := exec.Command("wget", server_ip+":"+port+"/"+fname)
+	cmd := exec.Command("wget", "-O", "/dev/null", server_ip+":"+port+"/"+fname)
 	o, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Default().Errorf("wget error: '%s'.\n%s", err, o)
 		return
 	}
 	log.Default().Debugf("Client output: %s", o)
-	os.Remove(fname)
 	finished <- nil
 }
 
@@ -461,7 +463,7 @@ func registerTestCase(fn TestFn, desc string) {
 
 func registerTests() {
 	registerTestCase(testLDPreloadIperfVpp, "LD preload iperf (VPP)")
-	registerTestCase(testLDPreloadIperfLinux, "LD preload iperf (Linux)")
+	registerTestCase(testIperfLinux, "iperf3 (Linux)")
 	registerTestCase(testHttpTps, "HTTP tps test")
 }
 
@@ -472,9 +474,16 @@ func printHelp() {
 	}
 }
 
+var colorReset = "\033[0m"
+var colorRed = "\033[31m"
+var colorGreen = "\033[32m"
+var colorPurple = "\033[35m"
+
 func runAll(tests []Test) {
 	for _, tc := range tests {
+		fmt.Println(string(colorPurple) + "$$ Starting test case " + tc.desc + string(colorReset))
 		tc.err = tc.fn()
+		fmt.Println(string(colorPurple) + "$$ End of test case: " + tc.desc + string(colorReset))
 	}
 	printResults(tests)
 }
@@ -487,11 +496,7 @@ func getResultString(tc *Test) (bool, string) {
 }
 
 func printResults(tests []Test) {
-	colorReset := "\033[0m"
-	colorRed := "\033[31m"
-	colorGreen := "\033[32m"
 	color := colorGreen
-
 	fmt.Println("\nResults:")
 	for i, tc := range tests {
 		res, str := getResultString(&tc)
