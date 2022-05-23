@@ -3,9 +3,162 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/ioutil"
+	"os"
 	"os/exec"
+	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
+type Item map[string]interface{}
+
+type TopoBase struct {
+	data map[string]*Topo
+}
+
+type Topo struct {
+	Devices []interface{} `yaml:"devices"`
+}
+
+type Device struct {
+	Name      string
+	Type      string
+	Namespace string
+}
+
+type Veth struct {
+	Device
+	Peer Device
+}
+
+type Bridge struct {
+	Device
+	Interfaces []string
+}
+
+func (c *Topo) Parse(data []byte) error {
+	return yaml.Unmarshal(data, c)
+}
+
+func configureBridge(dev Item) error {
+	var ifs []string
+	for _, v := range dev["interfaces"].([]interface{}) {
+		ifs = append(ifs, v.(string))
+	}
+	return AddBridge(dev["name"].(string), ifs, dev["namespace"].(string))
+}
+
+func configureTap(dev Item) error {
+	return AddTap(dev["name"].(string), dev["ip4"].(string))
+}
+
+func configureDevice(dev Item) error {
+	t := dev["type"]
+	if t == "namespace" {
+		return AddNamespace(dev["name"].(string))
+	} else if t == "veth" {
+		peer := dev["peer"].(map[string]interface{})
+		peerName := peer["name"].(string)
+		err := AddVethPair(dev["name"].(string), peerName)
+		if err != nil {
+			return err
+		}
+		peerNs := peer["namespace"].(string)
+		if peerNs != "" {
+			err := LinkSetNamespace(peerName, peerNs)
+			return err
+		}
+		return nil
+	} else if t == "bridge" {
+		return configureBridge(dev)
+	} else if t == "tap" {
+		return configureTap(dev)
+	}
+	return fmt.Errorf("unknown device type %s", t)
+}
+
+func (t *Topo) Configure() error {
+	for _, dev := range t.Devices {
+		d := dev.(map[string]interface{})
+		err := configureDevice(d)
+		if err != nil {
+			return fmt.Errorf("error while configuring device '%s': %v", d["name"], err)
+		}
+	}
+	return nil
+}
+
+func removeDevice(dev Item) {
+	t := dev["type"]
+	name := dev["name"].(string)
+
+	if t == "tap" {
+		DelLink(name)
+	} else if t == "namespace" {
+		DelNamespace(name)
+	} else if t == "veth" {
+		DelLink(name)
+	} else if t == "bridge" {
+		DelBridge(name, dev["namespace"].(string))
+	}
+}
+
+func (t *Topo) RemoveConfig() {
+	for i := len(t.Devices) - 1; i >= 0; i-- {
+		removeDevice(t.Devices[i].(map[string]interface{}))
+	}
+}
+
+func (t *TopoBase) FindTopoByName(name string) *Topo {
+	return t.data[name]
+}
+
+func (t *TopoBase) LoadTopologies(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+
+	files, err := dir.Readdir(0)
+	if err != nil {
+		return err
+	}
+
+	t.data = make(map[string]*Topo)
+	for i := range files {
+		file := files[i]
+		fileName := file.Name()
+
+		// read topologies from directory
+		topo, err := loadTopoFile(path + fileName)
+		if err != nil {
+			fmt.Println("failed to read topo file ", fileName)
+			return err
+		}
+		// cut off file extension
+		key := strings.Split(fileName, ".")[0]
+
+		t.data[key] = topo
+	}
+	return nil
+}
+
+func loadTopoFile(topoName string) (*Topo, error) {
+	var config Topo
+
+	data, err := ioutil.ReadFile(topoName)
+	if err != nil {
+		return nil, errors.New("read error")
+	}
+
+	if err := config.Parse(data); err != nil {
+		fmt.Printf("read err %s\n", err)
+		return nil, errors.New("error parsing topology data")
+	}
+	return &config, nil
+}
 func AddTap(ifName, ifAddress string) error {
 	cmd := exec.Command("ip", "tuntap", "add", ifName, "mode", "tap")
 	err := cmd.Run()
@@ -60,19 +213,18 @@ func SetDevDown(dev, ns string) error {
 	return setDevUpDown(dev, ns, false)
 }
 
-func AddVethPair(ifName string) (string, error) {
-	peer := ifName + "_veth"
-	cmd := exec.Command("ip", "link", "add", ifName, "type", "veth", "peer", "name", peer)
+func AddVethPair(ifName, peerName string) error {
+	cmd := exec.Command("ip", "link", "add", ifName, "type", "veth", "peer", "name", peerName)
 	err := cmd.Run()
 	if err != nil {
-		return "", errors.New("creating veth pair failed")
+		return errors.New("creating veth pair failed")
 	}
 
 	err = SetDevUp(ifName, "")
 	if err != nil {
-		return "", errors.New("set link up failed")
+		return errors.New("set link up failed")
 	}
-	return peer, nil
+	return nil
 }
 
 func addDelNamespace(name string, isAdd bool) error {
@@ -102,8 +254,7 @@ func LinkSetNamespace(ifName, ns string) error {
 	cmd := exec.Command("ip", "link", "set", "dev", ifName, "up", "netns", ns)
 	err := cmd.Run()
 	if err != nil {
-		s := fmt.Sprintf("Error configuring linux namespace %s!", ifName)
-		return errors.New(s)
+		return fmt.Errorf("error setting device '%s' to namespace '%s: %v", ifName, ns, err)
 	}
 	return nil
 }
@@ -132,7 +283,6 @@ func addDelBridge(brName, ns string, isAdd bool) error {
 	cmd := appendNs(c, ns)
 	err := cmd.Run()
 	if err != nil {
-		fmt.Println(cmd)
 		s := fmt.Sprintf("%s %s failed!", op, brName)
 		return errors.New(s)
 	}
