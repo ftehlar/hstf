@@ -151,13 +151,12 @@ func exitOnErrCh(ctx context.Context, cancel context.CancelFunc, errCh <-chan er
 	}(ctx, errCh)
 }
 
-func runAll(tests []TestCase) {
+func runAllTests(tests []TestCase) error {
 	for _, tc := range tests {
-		fmt.Println(string(colorPurple) + "$$ Starting test case " + tc.desc + string(colorReset))
-		tc.result = tc.fn()
-		fmt.Println(string(colorPurple) + "$$ End of test case: " + tc.desc + string(colorReset))
+		runSingleTest(&tc)
 	}
 	printResults(tests)
+	return nil
 }
 
 func registerTestCase(fn TestFn, desc string, topo *Topo, topoName string) {
@@ -166,7 +165,7 @@ func registerTestCase(fn TestFn, desc string, topo *Topo, topoName string) {
 
 func PrintTestDefinitions() {
 	for i, t := range testMatrix {
-		fmt.Printf(" %d %s (%s)\n", i, t.desc, t.topoName)
+		fmt.Printf(" %d %s [%s]\n", i, t.desc, t.topoName)
 	}
 }
 
@@ -206,10 +205,10 @@ func runSingleTest(t *TestCase) error {
 		if err != nil {
 			return fmt.Errorf("failed to prepare topology: %v", err)
 		}
+		defer t.topo.RemoveConfig()
 	} else {
 		fmt.Println("No topology defined for", t.desc)
 	}
-	defer t.topo.RemoveConfig()
 
 	fmt.Println(string(colorPurple) + "$$ Starting test case " + t.desc + string(colorReset))
 	err := t.fn()
@@ -224,6 +223,8 @@ func RunTestFw(a *Args) error {
 			return fmt.Errorf("invalid test index")
 		}
 		return runSingleTest(&tests[a.index])
+	case RunAllAction:
+		return runAllTests(tests)
 	case RemoveConfigAction:
 		topo := topoBase.FindTopoByName(a.topoName)
 		if topo == nil {
