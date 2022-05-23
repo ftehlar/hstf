@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"sync"
-	"syscall"
 
 	"git.fd.io/govpp.git/api"
 	"github.com/edwarnicke/vpphelper"
@@ -63,10 +62,6 @@ func startVpp(tc *TcContext, instance string, startupCofnig *Stanza, confFn Conf
 	ctx, cancel := signal.NotifyContext(
 		context.Background(),
 		os.Interrupt,
-		// More Linux signals here
-		syscall.SIGHUP,
-		syscall.SIGTERM,
-		syscall.SIGQUIT,
 	)
 	defer cancel()
 
@@ -89,7 +84,6 @@ func startVpp(tc *TcContext, instance string, startupCofnig *Stanza, confFn Conf
 	tc.wg.Done()
 
 	<-ctx.Done()
-	<-vppErrCh
 }
 
 func Vppcli(inst, command string) {
@@ -143,10 +137,8 @@ func exitOnErrCh(ctx context.Context, cancel context.CancelFunc, errCh <-chan er
 		log.FromContext(ctx).Fatal(err)
 	default:
 	}
-	// Otherwise wait for an error in the background to log and cancel
 	go func(ctx context.Context, errCh <-chan error) {
-		err := <-errCh
-		log.FromContext(ctx).Error(err)
+		<-errCh
 		cancel()
 	}(ctx, errCh)
 }
@@ -210,9 +202,9 @@ func runSingleTest(t *TestCase) error {
 		fmt.Println("No topology defined for", t.desc)
 	}
 
-	fmt.Println(string(colorPurple) + "$$ Starting test case " + t.desc + string(colorReset))
+	fmt.Println(string(colorPurple) + "Starting test case " + t.desc + string(colorReset))
 	err := t.fn()
-	fmt.Println(string(colorPurple) + "$$ End of test case: " + t.desc + string(colorReset))
+	fmt.Println(string(colorPurple) + "End of test case: " + t.desc + string(colorReset))
 	return err
 }
 

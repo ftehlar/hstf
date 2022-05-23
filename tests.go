@@ -82,7 +82,6 @@ func TestLDPreloadIperfVpp() error {
 	// waiting for both vpps to finish configuration
 	tc.wg.Wait()
 
-	Vppcli("vppsrv", "show int")
 	log.Default().Debug("attaching clients")
 
 	srvEnv := append(os.Environ(), addEnv, "VCL_CONFIG=vcl_srv.conf")
@@ -135,7 +134,7 @@ func configureLDPtest(ifName, interfaceAddress, namespaceId string, secret uint6
 		}
 		afPacketCreateRsp, err := af_packet.NewServiceClient(vppConn).AfPacketCreateV2(ctx, afPacketCreate)
 		if err != nil {
-			log.FromContext(ctx).Fatal("failed to create af packet: ", err)
+			log.FromContext(ctx).Fatalf("failed to create af packet: %v", err)
 			return err
 		}
 		_, err = ifaceClient.SwInterfaceSetFlags(ctx, &interfaces.SwInterfaceSetFlags{
