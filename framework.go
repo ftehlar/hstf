@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -43,6 +45,10 @@ type TcContext struct {
 	mainCh chan context.CancelFunc
 }
 
+type Config struct {
+	LdPreload string `json:"ld_preload"`
+}
+
 var colorReset = "\033[0m"
 var colorRed = "\033[31m"
 var colorGreen = "\033[32m"
@@ -50,6 +56,15 @@ var colorPurple = "\033[35m"
 
 var topoBase TopoBase
 var tests []TestCase
+var config Config
+
+func (c *Config) Load(confName string) error {
+	file, err := ioutil.ReadFile(confName)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(file, c)
+}
 
 func (tc *TcContext) init(nInst int) {
 	var wg sync.WaitGroup
@@ -172,8 +187,12 @@ func InitFramework() error {
 
 	err := topoBase.LoadTopologies(topoDir)
 	if err != nil {
-		fmt.Println("error loading topology definitions")
-		os.Exit(1)
+		return fmt.Errorf("error on loading topology definitions: %v", err)
+	}
+
+	err = config.Load("config.json")
+	if err != nil {
+		return fmt.Errorf("error on loading config file: %v", err)
 	}
 
 	for _, t := range testMatrix {

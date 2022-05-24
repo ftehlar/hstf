@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"time"
@@ -15,8 +16,6 @@ import (
 	"github.com/edwarnicke/govpp/binapi/session"
 	"github.com/networkservicemesh/sdk/pkg/tools/log"
 )
-
-var addEnv string = "LD_PRELOAD=/home/vagrant/vpp/build-root/build-vpp_debug-native/vpp/lib/x86_64-linux-gnu/libvcl_ldpreload.so"
 
 func startServerApp(running chan struct{}, done chan struct{}, env []string) {
 	cmd := exec.Command("iperf3", "-4", "-s")
@@ -61,6 +60,12 @@ func startClientApp(env []string, finished chan struct{}) {
 
 func TestLDPreloadIperfVpp() error {
 	var tc TcContext
+
+	if config.LdPreload == "" {
+		return fmt.Errorf("LD_COFNIG not set")
+	}
+	ldPreload := "LD_PRELOAD=" + config.LdPreload
+
 	tc.init(2)
 	stopServerCh := make(chan struct{}, 1)
 	serverRunning := make(chan struct{}, 1)
@@ -84,12 +89,12 @@ func TestLDPreloadIperfVpp() error {
 
 	log.Default().Debug("attaching clients")
 
-	srvEnv := append(os.Environ(), addEnv, "VCL_CONFIG=vcl_srv.conf")
+	srvEnv := append(os.Environ(), ldPreload, "VCL_CONFIG=vcl_srv.conf")
 	go startServerApp(serverRunning, stopServerCh, srvEnv)
 
 	<-serverRunning
 
-	clnEnv := append(os.Environ(), addEnv, "VCL_CONFIG=vcl_cln.conf")
+	clnEnv := append(os.Environ(), ldPreload, "VCL_CONFIG=vcl_cln.conf")
 	go startClientApp(clnEnv, tcFinished)
 
 	// wait for client
