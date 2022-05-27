@@ -22,9 +22,9 @@ type Topo struct {
 }
 
 type Device struct {
-	Name      string
-	Type      string
-	Namespace string
+	Name  string
+	Type  string
+	Netns string
 }
 
 type Veth struct {
@@ -46,17 +46,29 @@ func configureBridge(dev Item) error {
 	for _, v := range dev["interfaces"].([]interface{}) {
 		ifs = append(ifs, v.(string))
 	}
-	return AddBridge(dev["name"].(string), ifs, dev["namespace"].(string))
+	return AddBridge(dev["name"].(string), ifs, dev["netns"].(string))
 }
 
 func configureTap(dev Item) error {
 	return AddTap(dev["name"].(string), dev["ip4"].(string))
 }
 
+func AddAddress(device, address, ns string) error {
+	c := []string{"ip", "addr", "add", address, "dev", device}
+	cmd := appendNetns(c, ns)
+	err := cmd.Run()
+	if err != nil {
+		return fmt.Errorf("failed to set ip address for %s: %v", device, err)
+	}
+	return nil
+}
+
 func configureDevice(dev Item) error {
+	var peerNs string
+
 	t := dev["type"]
-	if t == "namespace" {
-		return AddNamespace(dev["name"].(string))
+	if t == "netns" {
+		return AddNetns(dev["name"].(string))
 	} else if t == "veth" {
 		peer := dev["peer"].(map[string]interface{})
 		peerName := peer["name"].(string)
@@ -64,10 +76,21 @@ func configureDevice(dev Item) error {
 		if err != nil {
 			return err
 		}
-		peerNs := peer["namespace"].(string)
-		if peerNs != "" {
-			err := LinkSetNamespace(peerName, peerNs)
-			return err
+
+		if peer["netns"] != nil {
+			peerNs = peer["netns"].(string)
+			if peerNs != "" {
+				err := LinkSetNetns(peerName, peerNs)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		if peer["ip4"] != nil {
+			err = AddAddress(peerName, peer["ip4"].(string), peerNs)
+			if err != nil {
+				return fmt.Errorf("failed to add configure address for %s: %v", peerName, err)
+			}
 		}
 		return nil
 	} else if t == "bridge" {
@@ -95,12 +118,12 @@ func removeDevice(dev Item) {
 
 	if t == "tap" {
 		DelLink(name)
-	} else if t == "namespace" {
-		DelNamespace(name)
+	} else if t == "netns" {
+		DelNetns(name)
 	} else if t == "veth" {
 		DelLink(name)
 	} else if t == "bridge" {
-		DelBridge(name, dev["namespace"].(string))
+		DelBridge(name, dev["netns"].(string))
 	}
 }
 
@@ -196,7 +219,7 @@ func setDevUpDown(dev, ns string, isUp bool) error {
 		op = "down"
 	}
 	c := []string{"ip", "link", "set", "dev", dev, op}
-	cmd := appendNs(c, ns)
+	cmd := appendNetns(c, ns)
 	err := cmd.Run()
 	if err != nil {
 		s := fmt.Sprintf("error bringing %s device %s!", dev, op)
@@ -217,17 +240,16 @@ func AddVethPair(ifName, peerName string) error {
 	cmd := exec.Command("ip", "link", "add", ifName, "type", "veth", "peer", "name", peerName)
 	err := cmd.Run()
 	if err != nil {
-		return errors.New("creating veth pair failed")
+		return fmt.Errorf("creating veth pair failed: %v", err)
 	}
-
 	err = SetDevUp(ifName, "")
 	if err != nil {
-		return errors.New("set link up failed")
+		return fmt.Errorf("set link up failed: %v", err)
 	}
 	return nil
 }
 
-func addDelNamespace(name string, isAdd bool) error {
+func addDelNetns(name string, isAdd bool) error {
 	var op string
 	if isAdd {
 		op = "add"
@@ -237,29 +259,39 @@ func addDelNamespace(name string, isAdd bool) error {
 	cmd := exec.Command("ip", "netns", op, name)
 	_, err := cmd.CombinedOutput()
 	if err != nil {
-		return errors.New("add/del namespace failed")
+		return errors.New("add/del netns failed")
 	}
 	return nil
 }
 
-func AddNamespace(nsName string) error {
-	return addDelNamespace(nsName, true)
+func AddNetns(nsName string) error {
+	return addDelNetns(nsName, true)
 }
 
-func DelNamespace(nsName string) error {
-	return addDelNamespace(nsName, false)
+func DelNetns(nsName string) error {
+	return addDelNetns(nsName, false)
 }
 
-func LinkSetNamespace(ifName, ns string) error {
+func LinkSetNetns(ifName, ns string) error {
 	cmd := exec.Command("ip", "link", "set", "dev", ifName, "up", "netns", ns)
 	err := cmd.Run()
 	if err != nil {
-		return fmt.Errorf("error setting device '%s' to namespace '%s: %v", ifName, ns, err)
+		return fmt.Errorf("error setting device '%s' to netns '%s: %v", ifName, ns, err)
 	}
 	return nil
 }
 
-func appendNs(s []string, ns string) *exec.Cmd {
+// exec command and wait for output
+func RunCommand(s []string, ns string) ([]byte, error) {
+	cmd := StartCommand(s, ns)
+	return cmd.CombinedOutput()
+}
+
+func StartCommand(s []string, ns string) *exec.Cmd {
+	return appendNetns(s, ns)
+}
+
+func appendNetns(s []string, ns string) *exec.Cmd {
 	var cmd *exec.Cmd
 	if ns == "" {
 		// use default namespace
@@ -280,7 +312,7 @@ func addDelBridge(brName, ns string, isAdd bool) error {
 		op = "delbr"
 	}
 	var c = []string{"brctl", op, brName}
-	cmd := appendNs(c, ns)
+	cmd := appendNetns(c, ns)
 	err := cmd.Run()
 	if err != nil {
 		s := fmt.Sprintf("%s %s failed!", op, brName)
@@ -297,10 +329,10 @@ func AddBridge(brName string, ifs []string, ns string) error {
 
 	for _, v := range ifs {
 		c := []string{"brctl", "addif", brName, v}
-		cmd := appendNs(c, ns)
+		cmd := appendNetns(c, ns)
 		err = cmd.Run()
 		if err != nil {
-			s := fmt.Sprintf("error adding %s to bridge %s!", v, brName)
+			s := fmt.Sprintf("error adding %s to bridge %s: %v", v, brName, err)
 			return errors.New(s)
 		}
 	}

@@ -110,7 +110,7 @@ func TestLDPreloadIperfVpp() error {
 	return nil
 }
 
-func configureHttpTps(inst, server_ip, port string) ConfFn {
+func configureHttpTps(server_ip, port string) ConfFn {
 	return func(ctx context.Context,
 		vppConn api.Connection) error {
 		client_ip4 := "172.0.0.2"
@@ -131,46 +131,14 @@ func configureHttpTps(inst, server_ip, port string) ConfFn {
 func configureLDPtest(ifName, interfaceAddress, namespaceId string, secret uint64) ConfFn {
 	return func(ctx context.Context,
 		vppConn api.Connection) error {
-		ifaceClient := interfaces.NewServiceClient(vppConn)
-		afPacketCreate := &af_packet.AfPacketCreateV2{
-			UseRandomHwAddr: true,
-			HostIfName:      ifName,
-			NumRxQueues:     1,
-		}
-		afPacketCreateRsp, err := af_packet.NewServiceClient(vppConn).AfPacketCreateV2(ctx, afPacketCreate)
+
+		swIfIndex, err := configureAfPacket(ctx, vppConn, ifName, interfaceAddress)
 		if err != nil {
 			log.FromContext(ctx).Fatalf("failed to create af packet: %v", err)
-			return err
 		}
-		_, err = ifaceClient.SwInterfaceSetFlags(ctx, &interfaces.SwInterfaceSetFlags{
-			SwIfIndex: afPacketCreateRsp.SwIfIndex,
-			Flags:     interface_types.IF_STATUS_API_FLAG_ADMIN_UP,
-		})
-		if err != nil {
-			log.FromContext(ctx).Fatal("set interface table ", err)
-			return err
-		}
-
-		ipPrefix, err := ip_types.ParseAddressWithPrefix(interfaceAddress)
-		if err != nil {
-			log.FromContext(ctx).Fatal("parse ip address ", err)
-			return err
-		}
-
-		ipAddress := &interfaces.SwInterfaceAddDelAddress{
-			IsAdd:     true,
-			SwIfIndex: afPacketCreateRsp.SwIfIndex,
-			Prefix:    ipPrefix,
-		}
-		_, errx := ifaceClient.SwInterfaceAddDelAddress(ctx, ipAddress)
-		if errx != nil {
-			log.FromContext(ctx).Fatal("add ip address ", err)
-			return err
-		}
-
 		_, er := session.NewServiceClient(vppConn).AppNamespaceAddDelV2(ctx, &session.AppNamespaceAddDelV2{
 			Secret:      secret,
-			SwIfIndex:   afPacketCreateRsp.SwIfIndex,
+			SwIfIndex:   swIfIndex,
 			NamespaceID: namespaceId,
 		})
 		if er != nil {
@@ -229,6 +197,150 @@ func receiveCancelFns(tc *TcContext, n int) []context.CancelFunc {
 	return res
 }
 
+func configureAfPacket(ctx context.Context, vppCon api.Connection,
+	name, interfaceAddress string) (interface_types.InterfaceIndex, error) {
+	ifaceClient := interfaces.NewServiceClient(vppCon)
+	afPacketCreate := &af_packet.AfPacketCreateV2{
+		UseRandomHwAddr: true,
+		HostIfName:      name,
+		NumRxQueues:     1,
+	}
+	afPacketCreateRsp, err := af_packet.NewServiceClient(vppCon).AfPacketCreateV2(ctx, afPacketCreate)
+	if err != nil {
+		log.FromContext(ctx).Fatalf("failed to create af packet: %v", err)
+		return 0, err
+	}
+	_, err = ifaceClient.SwInterfaceSetFlags(ctx, &interfaces.SwInterfaceSetFlags{
+		SwIfIndex: afPacketCreateRsp.SwIfIndex,
+		Flags:     interface_types.IF_STATUS_API_FLAG_ADMIN_UP,
+	})
+	if err != nil {
+		log.FromContext(ctx).Fatal("set interface state up failed: ", err)
+		return 0, err
+	}
+	ipPrefix, err := ip_types.ParseAddressWithPrefix(interfaceAddress)
+	if err != nil {
+		log.FromContext(ctx).Fatal("parse ip address ", err)
+		return 0, err
+	}
+	ipAddress := &interfaces.SwInterfaceAddDelAddress{
+		IsAdd:     true,
+		SwIfIndex: afPacketCreateRsp.SwIfIndex,
+		Prefix:    ipPrefix,
+	}
+	_, errx := ifaceClient.SwInterfaceAddDelAddress(ctx, ipAddress)
+	if errx != nil {
+		log.FromContext(ctx).Fatal("add ip address ", err)
+		return 0, err
+	}
+	return afPacketCreateRsp.SwIfIndex, nil
+}
+
+func configureProxyTcp(ifName0, ipAddr0, ifName1, ipAddr1 string) ConfFn {
+	return func(ctx context.Context,
+		vppConn api.Connection) error {
+
+		_, err := configureAfPacket(ctx, vppConn, ifName0, ipAddr0)
+		if err != nil {
+			log.FromContext(ctx).Fatalf("failed to create af packet: %v", err)
+			return err
+		}
+		_, err = configureAfPacket(ctx, vppConn, ifName1, ipAddr1)
+		if err != nil {
+			log.FromContext(ctx).Fatalf("failed to create af packet: %v", err)
+			return err
+		}
+		return nil
+	}
+}
+
+func startHttpServer(running chan struct{}, done chan struct{}, addressPort, netNs string) {
+	cmd := StartCommand([]string{"./tools/http_server/http_server", addressPort}, netNs)
+	err := cmd.Start()
+	if err != nil {
+		fmt.Println("Failed to start http server")
+		return
+	}
+	running <- struct{}{}
+	<-done
+	cmd.Process.Kill()
+}
+
+func assertFileSize(f1, f2 string) error {
+	fi1, err := os.Stat(f1)
+	if err != nil {
+		return err
+	}
+
+	fi2, err1 := os.Stat(f2)
+	if err1 != nil {
+		return err1
+	}
+
+	if fi1.Size() != fi2.Size() {
+		return fmt.Errorf("file sizes differ (%d vs %d)", fi1.Size(), fi2.Size())
+	}
+	return nil
+}
+
+func TestProxyTcp() error {
+	const outputFile = "test.data"
+	const srcFile = "10M"
+	var tc TcContext
+	stopServer := make(chan struct{}, 1)
+	serverRunning := make(chan struct{}, 1)
+	tc.init(1)
+
+	go startVpp(&tc, "vpp-proxytcp", &Stanza{},
+		configureProxyTcp("vpp0", "10.0.0.2/24", "vpp1", "10.0.1.2/24"))
+
+	cancelFns := receiveCancelFns(&tc, 1)
+	for _, fn := range cancelFns {
+		defer fn()
+	}
+	tc.wg.Wait()
+
+	// configure proxy
+	Vppcli("vpp-proxytcp", "test proxy server server-uri tcp://10.0.0.2/555 client-uri tcp://10.0.1.1/666")
+
+	// create test file
+	c := []string{"truncate", "-s", srcFile, srcFile}
+	_, err := RunCommand(c, "server")
+	if err != nil {
+		return fmt.Errorf("failed to run truncate command")
+	}
+	defer func() {
+		os.Remove(srcFile)
+	}()
+
+	go startHttpServer(serverRunning, stopServer, ":666", "server")
+	// TODO better error handling and recovery
+	<-serverRunning
+
+	defer func(chan struct{}) {
+		stopServer <- struct{}{}
+	}(stopServer)
+
+	fmt.Println("https server started...")
+
+	c = []string{"wget", "10.0.0.2:555/" + srcFile, "-O", outputFile}
+	o, err1 := RunCommand(c, "client")
+	if err1 != nil {
+		return fmt.Errorf("failed to run wget: %v %v", err1, string(o))
+	}
+
+	stopServer <- struct{}{}
+
+	defer func() {
+		os.Remove(outputFile)
+	}()
+
+	if err = assertFileSize(outputFile, srcFile); err != nil {
+		return err
+	}
+	return nil
+}
+
 func TestHttpTps() error {
 	finished := make(chan error, 1)
 	var rc error
@@ -238,7 +350,7 @@ func TestHttpTps() error {
 	port := "8080"
 
 	log.Default().Debug("starting vpp..")
-	go startVpp(&tc, "vpp-tps", &Stanza{}, configureHttpTps("vpp-tps", server_ip, port))
+	go startVpp(&tc, "vpp-tps", &Stanza{}, configureHttpTps(server_ip, port))
 	cancelFns := receiveCancelFns(&tc, 1)
 
 	tc.wg.Wait()

@@ -1,23 +1,23 @@
 ---
 devices:
   - name: "hsns"
-    type: "namespace"
+    type: "netns"
 
   - name: "vppsrv"
     type: "veth"
     peer:
       name: "vppsrv_veth"
-      namespace: "hsns"
+      netns: "hsns"
 
   - name: "vppcln"
     type: "veth"
     peer:
       name: "vppcln_veth"
-      namespace: "hsns"
+      netns: "hsns"
 
   - name: "br"
     type: "bridge"
-    namespace: "hsns"
+    netns: "hsns"
     interfaces:
       - vppsrv_veth
       - vppcln_veth

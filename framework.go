@@ -24,6 +24,7 @@ var testMatrix = []TestDesc{
 	{TestLDPreloadIperfVpp, "2peerVeth", "LD preload iperf (VPP)"},
 	{TestIperfLinux, "tap", "iperf3 (Linux)"},
 	{TestHttpTps, "", "HTTP tps test"},
+	{TestProxyTcp, "ns", "TCP Proxy"},
 }
 
 type TestDesc struct {
@@ -78,7 +79,6 @@ func startVpp(tc *TcContext, instance string, startupCofnig *Stanza, confFn Conf
 		context.Background(),
 		os.Interrupt,
 	)
-	defer cancel()
 
 	tc.mainCh <- cancel
 
@@ -94,10 +94,9 @@ func startVpp(tc *TcContext, instance string, startupCofnig *Stanza, confFn Conf
 	if err != nil {
 		log.FromContext(ctx).Errorf("configuration failed: %s", err)
 	}
-
-	// 'notify' main thread that configuration is finished
+	// notify main thread that configuration is finished
 	tc.wg.Done()
-
+	log.FromContext(ctx).Infof("cli socket: %s/var/run/vpp/cli.sock", path)
 	<-ctx.Done()
 }
 
@@ -107,7 +106,7 @@ func Vppcli(inst, command string) {
 	if err != nil {
 		log.Default().Errorf("failed to execute command: '%s'.\n", err)
 	}
-	log.Default().Debugf("Command output %s", o)
+	log.Default().Debugf("Command output %s", string(o))
 }
 
 /* func createtempDir() string {
