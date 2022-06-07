@@ -61,6 +61,11 @@ func startClientApp(env []string, finished chan struct{}) {
 
 func TestLDPreloadIperfVpp() error {
 	var tc TcContext
+	var clnVclConf, srvVclConf, startup Stanza
+	srvInstance := "vppsrv"
+	clnInstance := "vppcln"
+	srvVcl := fmt.Sprintf("/tmp/%s/vcl_srv.conf", srvInstance)
+	clnVcl := fmt.Sprintf("/tmp/%s/vcl_cln.conf", clnInstance)
 
 	if config.LdPreload == "" {
 		return fmt.Errorf("LD_COFNIG not set")
@@ -73,29 +78,47 @@ func TestLDPreloadIperfVpp() error {
 
 	tcFinished := make(chan struct{})
 
-	var startup Stanza
 	startup.
 		NewStanza("session").
 		Append("enable").
 		Append("use-app-socket-api").Close()
 
 	log.Default().Debug("starting vpps")
-	go startVpp(&tc, "vppsrv", &startup, configureLDPtest("vppsrv", "10.10.10.1/24", "1", 1))
-	go startVpp(&tc, "vppcln", &startup, configureLDPtest("vppcln", "10.10.10.2/24", "2", 2))
+	go startVpp(&tc, srvInstance, &startup, configureLDPtest("vppsrv", "10.10.10.1/24", "1", 1))
+	go startVpp(&tc, clnInstance, &startup, configureLDPtest("vppcln", "10.10.10.2/24", "2", 2))
 
 	cancelFns := receiveCancelFns(&tc, 2)
 
 	// waiting for both vpps to finish configuration
 	tc.wg.Wait()
 
+	clnVclConf.
+		NewStanza("vcl").
+		Append("rx-fifo-size 4000000").
+		Append("tx-fifo-size 4000000").
+		Append("app-scope-local").
+		Append("app-scope-global").
+		Append("use-mq-eventfd").
+		Append(fmt.Sprintf("app-socket-api /tmp/%s/var/run/vpp/app_ns_sockets/2", clnInstance)).Close().
+		SaveToFile(clnVcl)
+
+	srvVclConf.
+		NewStanza("vcl").
+		Append("rx-fifo-size 4000000").
+		Append("tx-fifo-size 4000000").
+		Append("app-scope-local").
+		Append("app-scope-global").
+		Append("use-mq-eventfd").
+		Append(fmt.Sprintf("app-socket-api /tmp/%s/var/run/vpp/app_ns_sockets/1", srvInstance)).Close().
+		SaveToFile(srvVcl)
 	log.Default().Debug("attaching clients")
 
-	srvEnv := append(os.Environ(), ldPreload, "VCL_CONFIG=vcl_srv.conf")
+	srvEnv := append(os.Environ(), ldPreload, "VCL_CONFIG="+srvVcl)
 	go startServerApp(serverRunning, stopServerCh, srvEnv)
 
 	<-serverRunning
 
-	clnEnv := append(os.Environ(), ldPreload, "VCL_CONFIG=vcl_cln.conf")
+	clnEnv := append(os.Environ(), ldPreload, "VCL_CONFIG="+clnVcl)
 	go startClientApp(clnEnv, tcFinished)
 
 	// wait for client

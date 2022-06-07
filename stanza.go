@@ -1,6 +1,10 @@
 package main
 
-import "strings"
+import (
+	"io"
+	"os"
+	"strings"
+)
 
 type Stanza struct {
 	content string
@@ -27,4 +31,15 @@ func (c *Stanza) Close() *Stanza {
 
 func (s *Stanza) ToString() string {
 	return s.content
+}
+
+func (s *Stanza) SaveToFile(fileName string) error {
+	fo, err := os.Create(fileName)
+	if err != nil {
+		return err
+	}
+	defer fo.Close()
+
+	_, err = io.Copy(fo, strings.NewReader(s.content))
+	return err
 }
