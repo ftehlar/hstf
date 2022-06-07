@@ -1,0 +1,1 @@
+PATH=/home/vagrant/vpp/build-root/build-vpp_debug-native/vpp/bin:$PATH sudo ./hstf $@

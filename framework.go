@@ -24,7 +24,8 @@ var testMatrix = []TestDesc{
 	{TestLDPreloadIperfVpp, "2peerVeth", "LD preload iperf (VPP)"},
 	{TestIperfLinux, "tap", "iperf3 (Linux)"},
 	{TestHttpTps, "", "HTTP tps test"},
-	{TestProxyTcp, "ns", "TCP Proxy"},
+	{TestVppProxyHttpTcp, "ns", "HTTP/TCP  Vpp Proxy"},
+	{TestEnvoyProxyHttpTcp, "ns", "Envoy HTTP/TCP Proxy"},
 }
 
 type TestDesc struct {
@@ -127,9 +128,9 @@ func Vppcli(inst, command string) {
 
 func getResultString(tc *TestCase) (bool, string) {
 	if tc.result == nil {
-		return true, "passed"
+		return true, string(colorGreen) + "Passed" + string(colorReset)
 	}
-	return false, "failed"
+	return false, string(colorRed) + "Failed" + string(colorReset)
 }
 
 func printResults(tests []TestCase) {
@@ -209,6 +210,7 @@ func InitFramework() error {
 }
 
 func runSingleTest(t *TestCase) error {
+	t.result = fmt.Errorf("unspecified error")
 	if t.topo != nil {
 		fmt.Printf("Configuring topology %s for %s\n", t.topoName, t.desc)
 		err := t.topo.Configure()
@@ -221,9 +223,11 @@ func runSingleTest(t *TestCase) error {
 	}
 
 	fmt.Println(string(colorPurple) + "Starting test case " + t.desc + string(colorReset))
-	err := t.fn()
+	t.result = t.fn()
 	fmt.Println(string(colorPurple) + "End of test case: " + t.desc + string(colorReset))
-	return err
+	_, s := getResultString(t)
+	fmt.Println(s)
+	return t.result
 }
 
 func RunTestFw(a *Args) error {

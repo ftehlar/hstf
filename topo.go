@@ -283,11 +283,11 @@ func LinkSetNetns(ifName, ns string) error {
 
 // exec command and wait for output
 func RunCommand(s []string, ns string) ([]byte, error) {
-	cmd := StartCommand(s, ns)
+	cmd := NewCommand(s, ns)
 	return cmd.CombinedOutput()
 }
 
-func StartCommand(s []string, ns string) *exec.Cmd {
+func NewCommand(s []string, ns string) *exec.Cmd {
 	return appendNetns(s, ns)
 }
 

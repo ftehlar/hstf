@@ -14,6 +14,7 @@ import (
 	"github.com/edwarnicke/govpp/binapi/interface_types"
 	ip_types "github.com/edwarnicke/govpp/binapi/ip_types"
 	"github.com/edwarnicke/govpp/binapi/session"
+	"github.com/edwarnicke/govpp/binapi/tapv2"
 	"github.com/networkservicemesh/sdk/pkg/tools/log"
 )
 
@@ -197,6 +198,46 @@ func receiveCancelFns(tc *TcContext, n int) []context.CancelFunc {
 	return res
 }
 
+// unused
+func _configureVppTap(ctx context.Context, con api.Connection, name, addr1, addr2 string) error {
+	ifaceClient := interfaces.NewServiceClient(con)
+	var pref ip_types.IP4Prefix
+	pref.UnmarshalText([]byte(addr1))
+	rsp, err := tapv2.NewServiceClient(con).TapCreateV2(ctx,
+		&tapv2.TapCreateV2{HostIP4PrefixSet: true,
+			HostIP4Prefix: ip_types.IP4AddressWithPrefix(pref),
+		})
+	if err != nil {
+		return fmt.Errorf("failed to configure tap: %v", err)
+	}
+
+	_, err = ifaceClient.SwInterfaceSetFlags(ctx, &interfaces.SwInterfaceSetFlags{
+		SwIfIndex: rsp.SwIfIndex,
+		Flags:     interface_types.IF_STATUS_API_FLAG_ADMIN_UP,
+	})
+	if err != nil {
+		log.FromContext(ctx).Fatal("set interface state up failed: ", err)
+		return err
+	}
+
+	ipPrefix, err := ip_types.ParseAddressWithPrefix(addr2)
+	if err != nil {
+		log.FromContext(ctx).Fatal("parse ip address ", err)
+		return err
+	}
+	ipAddress := &interfaces.SwInterfaceAddDelAddress{
+		IsAdd:     true,
+		SwIfIndex: rsp.SwIfIndex,
+		Prefix:    ipPrefix,
+	}
+	_, errx := ifaceClient.SwInterfaceAddDelAddress(ctx, ipAddress)
+	if errx != nil {
+		log.FromContext(ctx).Fatal("add ip address ", err)
+		return err
+	}
+	return nil
+}
+
 func configureAfPacket(ctx context.Context, vppCon api.Connection,
 	name, interfaceAddress string) (interface_types.InterfaceIndex, error) {
 	ifaceClient := interfaces.NewServiceClient(vppCon)
@@ -255,7 +296,7 @@ func configureProxyTcp(ifName0, ipAddr0, ifName1, ipAddr1 string) ConfFn {
 }
 
 func startHttpServer(running chan struct{}, done chan struct{}, addressPort, netNs string) {
-	cmd := StartCommand([]string{"./tools/http_server/http_server", addressPort}, netNs)
+	cmd := NewCommand([]string{"./tools/http_server/http_server", addressPort}, netNs)
 	err := cmd.Start()
 	if err != nil {
 		fmt.Println("Failed to start http server")
@@ -283,7 +324,60 @@ func assertFileSize(f1, f2 string) error {
 	return nil
 }
 
-func TestProxyTcp() error {
+func TestVppProxyHttpTcp() error {
+	vppConf := configureProxyTcp("vpp0", "10.0.0.2/24", "vpp1", "10.0.1.2/24")
+	instance := "vpp-proxy"
+	return testProxyHttpTcp(instance, &Stanza{}, vppConf, func() error {
+		// configure test proxy on vpp
+		Vppcli(instance, "test proxy server server-uri tcp://10.0.0.2/555 client-uri tcp://10.0.1.1/666")
+		return nil
+	})
+}
+
+func TestEnvoyProxyHttpTcp() error {
+	var startup Stanza
+	startup.
+		NewStanza("session").
+		Append("enable").
+		Append("use-app-socket-api").
+		Append("evt_qs_memfd_seg").
+		Append("event-queue-length 100000").Close()
+
+	defer func() {
+		RunCommand([]string{"docker", "stop", "envoy"}, "")
+	}()
+
+	instance := "vpp-envoy"
+	return testProxyHttpTcp(instance, &startup,
+		configureProxyTcp("vpp0", "10.0.0.2/24", "vpp1", "10.0.1.2/24"),
+		func() error {
+			wd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			_, err0 := RunCommand([]string{"chmod", "777", "-R",
+				fmt.Sprintf("/tmp/%s", instance)}, "")
+			if err0 != nil {
+				return fmt.Errorf("failed to chmod socket file: %v", err0)
+			}
+
+			c := []string{"docker", "run", "--rm", "--name", "envoy",
+				"-v", fmt.Sprintf("%s/envoy/proxy.yaml:/etc/envoy/envoy.yaml", wd),
+				"-v", fmt.Sprintf("/tmp/%s/var/run/vpp:/var/run/vpp", instance),
+				"-v", fmt.Sprintf("%s/envoy:/tmp", wd),
+				"-e", "VCL_CONFIG=/tmp/vcl.conf",
+				"envoyproxy/envoy-contrib:v1.21-latest"}
+			fmt.Println(c)
+			cmd := NewCommand(c, "")
+			err = cmd.Start()
+			if err != nil {
+				return err
+			}
+			return nil
+		})
+}
+
+func testProxyHttpTcp(instance string, stanza *Stanza, vppConf ConfFn, proxySetup func() error) error {
 	const outputFile = "test.data"
 	const srcFile = "10M"
 	var tc TcContext
@@ -291,17 +385,18 @@ func TestProxyTcp() error {
 	serverRunning := make(chan struct{}, 1)
 	tc.init(1)
 
-	go startVpp(&tc, "vpp-proxytcp", &Stanza{},
-		configureProxyTcp("vpp0", "10.0.0.2/24", "vpp1", "10.0.1.2/24"))
+	go startVpp(&tc, instance, stanza, vppConf)
 
 	cancelFns := receiveCancelFns(&tc, 1)
 	for _, fn := range cancelFns {
 		defer fn()
 	}
 	tc.wg.Wait()
+	fmt.Println("VPP running and configured...")
 
-	// configure proxy
-	Vppcli("vpp-proxytcp", "test proxy server server-uri tcp://10.0.0.2/555 client-uri tcp://10.0.1.1/666")
+	if err := proxySetup(); err != nil {
+		return fmt.Errorf("failed to setup proxy: %v", err)
+	}
 
 	// create test file
 	c := []string{"truncate", "-s", srcFile, srcFile}
@@ -323,12 +418,11 @@ func TestProxyTcp() error {
 
 	fmt.Println("https server started...")
 
-	c = []string{"wget", "10.0.0.2:555/" + srcFile, "-O", outputFile}
+	c = []string{"wget", "--retry-connrefused", "--retry-on-http-error=503", "--tries=10", "10.0.0.2:555/" + srcFile, "-O", outputFile}
 	o, err1 := RunCommand(c, "client")
 	if err1 != nil {
 		return fmt.Errorf("failed to run wget: %v %v", err1, string(o))
 	}
-
 	stopServer <- struct{}{}
 
 	defer func() {
