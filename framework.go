@@ -233,7 +233,7 @@ func runSingleTest(t *TestCase) error {
 func RunTestFw(a *Args) error {
 	switch a.action {
 	case RunSingleAction:
-		if a.index > len(tests) {
+		if a.index >= len(tests) {
 			return fmt.Errorf("invalid test index")
 		}
 		return runSingleTest(&tests[a.index])
