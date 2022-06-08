@@ -78,7 +78,7 @@ func main() {
 
 	err = InitFramework()
 	if err != nil {
-		fmt.Println("error on framework init")
+		fmt.Println("error on framework init: %v", err)
 		os.Exit(1)
 	}
 	err = RunTestFw(&args)

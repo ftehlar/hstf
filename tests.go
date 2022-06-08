@@ -67,10 +67,11 @@ func TestLDPreloadIperfVpp() error {
 	srvVcl := fmt.Sprintf("/tmp/%s/vcl_srv.conf", srvInstance)
 	clnVcl := fmt.Sprintf("/tmp/%s/vcl_cln.conf", clnInstance)
 
-	if config.LdPreload == "" {
-		return fmt.Errorf("LD_COFNIG not set")
+	ldpreload := os.Getenv("HSTF_LDPRELOAD")
+	if ldpreload == "" {
+		return fmt.Errorf("HSTF_LDPRELOAD not set")
 	}
-	ldPreload := "LD_PRELOAD=" + config.LdPreload
+	ldpreload = "LD_PRELOAD=" + ldpreload
 
 	tc.init(2)
 	stopServerCh := make(chan struct{}, 1)
@@ -113,12 +114,12 @@ func TestLDPreloadIperfVpp() error {
 		SaveToFile(srvVcl)
 	log.Default().Debug("attaching clients")
 
-	srvEnv := append(os.Environ(), ldPreload, "VCL_CONFIG="+srvVcl)
+	srvEnv := append(os.Environ(), ldpreload, "VCL_CONFIG="+srvVcl)
 	go startServerApp(serverRunning, stopServerCh, srvEnv)
 
 	<-serverRunning
 
-	clnEnv := append(os.Environ(), ldPreload, "VCL_CONFIG="+clnVcl)
+	clnEnv := append(os.Environ(), ldpreload, "VCL_CONFIG="+clnVcl)
 	go startClientApp(clnEnv, tcFinished)
 
 	// wait for client

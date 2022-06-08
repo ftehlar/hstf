@@ -1,1 +1,10 @@
-PATH=/home/vagrant/vpp/build-root/build-vpp_debug-native/vpp/bin:$PATH sudo ./hstf $@
+#!/usr/bin/env bash
+
+if [ -f ~/.hstf.conf ]; then
+    . ~/.hstf.conf
+else
+    echo "Create ~/.hstf.conf with HSTF_LDPRELOAD variable pointing to libvcl_ldpreload.so"
+    exit 1
+fi
+
+sudo -E ./hstf $@

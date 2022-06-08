@@ -1,3 +1,0 @@
-{
-  "ld_preload": "/home/vagrant/vpp/build-root/build-vpp_debug-native/vpp/lib/x86_64-linux-gnu/libvcl_ldpreload.so"
-}
