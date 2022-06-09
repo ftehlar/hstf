@@ -64,6 +64,8 @@ func TestLDPreloadIperfVpp() error {
 	var clnVclConf, srvVclConf, startup Stanza
 	srvInstance := "vppsrv"
 	clnInstance := "vppcln"
+	srvRunDir := "/tmp/" + srvInstance
+	clnRunDir := "/tmp/" + clnInstance
 	srvVcl := fmt.Sprintf("/tmp/%s/vcl_srv.conf", srvInstance)
 	clnVcl := fmt.Sprintf("/tmp/%s/vcl_cln.conf", clnInstance)
 
@@ -85,8 +87,8 @@ func TestLDPreloadIperfVpp() error {
 		Append("use-app-socket-api").Close()
 
 	log.Default().Debug("starting vpps")
-	go startVpp(&tc, srvInstance, &startup, configureLDPtest("vppsrv", "10.10.10.1/24", "1", 1))
-	go startVpp(&tc, clnInstance, &startup, configureLDPtest("vppcln", "10.10.10.2/24", "2", 2))
+	go startVpp(&tc, srvRunDir, startup.ToString(), configureLDPtest("vppsrv", "10.10.10.1/24", "1", 1))
+	go startVpp(&tc, clnRunDir, startup.ToString(), configureLDPtest("vppcln", "10.10.10.2/24", "2", 2))
 
 	cancelFns := receiveCancelFns(&tc, 2)
 
@@ -135,7 +137,7 @@ func TestLDPreloadIperfVpp() error {
 	return nil
 }
 
-func configureHttpTps(server_ip, port string) ConfFn {
+func configureHttpTps(runDir, server_ip, port string) ConfFn {
 	return func(ctx context.Context,
 		vppConn api.Connection) error {
 		client_ip4 := "172.0.0.2"
@@ -145,10 +147,10 @@ func configureHttpTps(server_ip, port string) ConfFn {
 		if err != nil {
 			return err
 		}
-		Vppcli("vpp-tps", "create tap id 0 host-ip4-addr "+client_ip4+"/24")
-		Vppcli("vpp-tps", "set int ip addr tap0 "+server_ip+"/24")
-		Vppcli("vpp-tps", "set int state tap0 up")
-		Vppcli("vpp-tps", "http tps uri tcp://0.0.0.0/"+port)
+		Vppcli(runDir, "create tap id 0 host-ip4-addr "+client_ip4+"/24")
+		Vppcli(runDir, "set int ip addr tap0 "+server_ip+"/24")
+		Vppcli(runDir, "set int state tap0 up")
+		Vppcli(runDir, "http tps uri tcp://0.0.0.0/"+port)
 		return nil
 	}
 }
@@ -350,10 +352,11 @@ func assertFileSize(f1, f2 string) error {
 
 func TestVppProxyHttpTcp() error {
 	vppConf := configureProxyTcp("vpp0", "10.0.0.2/24", "vpp1", "10.0.1.2/24")
+	runDir := "/tmp/"
 	instance := "vpp-proxy"
 	return testProxyHttpTcp(instance, &Stanza{}, vppConf, func() error {
 		// configure test proxy on vpp
-		Vppcli(instance, "test proxy server server-uri tcp://10.0.0.2/555 client-uri tcp://10.0.1.1/666")
+		Vppcli(runDir+instance, "test proxy server server-uri tcp://10.0.0.2/555 client-uri tcp://10.0.1.1/666")
 		return nil
 	})
 }
@@ -409,7 +412,8 @@ func testProxyHttpTcp(instance string, stanza *Stanza, vppConf ConfFn, proxySetu
 	serverRunning := make(chan struct{}, 1)
 	tc.init(1)
 
-	go startVpp(&tc, instance, stanza, vppConf)
+	runDir := "/tmp/" + instance
+	go startVpp(&tc, runDir, fmt.Sprintf(configTemplate, runDir, ""), vppConf)
 
 	cancelFns := receiveCancelFns(&tc, 1)
 	for _, fn := range cancelFns {
@@ -459,6 +463,34 @@ func testProxyHttpTcp(instance string, stanza *Stanza, vppConf ConfFn, proxySetu
 	return nil
 }
 
+const configTemplate = `unix {
+  nodaemon
+  log %[1]s/var/log/vpp/vpp.log
+  full-coredump
+  cli-listen %[1]s/var/run/vpp/cli.sock
+  runtime-dir %[1]s/var/run
+  gid vpp
+}
+
+api-trace {
+  on
+}
+
+api-segment {
+  gid vpp
+}
+
+socksvr {
+  socket-name %[1]s/var/run/vpp/api.sock
+}
+
+statseg {
+  socket-name %[1]s/var/run/vpp/stats.sock
+}
+
+%[2]s
+`
+
 func TestHttpTps() error {
 	finished := make(chan error, 1)
 	var rc error
@@ -466,9 +498,11 @@ func TestHttpTps() error {
 	tc.init(1)
 	server_ip := "172.0.0.1"
 	port := "8080"
+	runDir := "/tmp/vpp-tps"
 
 	log.Default().Debug("starting vpp..")
-	go startVpp(&tc, "vpp-tps", &Stanza{}, configureHttpTps(server_ip, port))
+	go startVpp(&tc, runDir, fmt.Sprintf(configTemplate, runDir, ""),
+		configureHttpTps(runDir, server_ip, port))
 	cancelFns := receiveCancelFns(&tc, 1)
 
 	tc.wg.Wait()

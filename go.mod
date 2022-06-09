@@ -46,6 +46,3 @@ require (
 	google.golang.org/protobuf v1.27.1 // indirect
 	gopkg.in/fsnotify.v1 v1.4.7 // indirect
 )
-
-// TODO remove
-replace github.com/edwarnicke/vpphelper => ../ftehlar-vpphelper/

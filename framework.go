@@ -22,7 +22,7 @@ var testMatrix = []TestDesc{
 	{TestLDPreloadIperfVpp, "2peerVeth", "LD preload iperf (VPP)"},
 	{TestIperfLinux, "tap", "iperf3 (Linux)"},
 	{TestHttpTps, "", "HTTP tps test"},
-	{TestVppProxyHttpTcp, "ns", "HTTP/TCP  Vpp Proxy"},
+	{TestVppProxyHttpTcp, "ns", "HTTP/TCP Vpp Proxy"},
 	{TestEnvoyProxyHttpTcp, "ns", "Envoy HTTP/TCP Proxy"},
 }
 
@@ -60,7 +60,7 @@ func (tc *TcContext) init(nInst int) {
 	tc.mainCh = make(chan context.CancelFunc)
 }
 
-func startVpp(tc *TcContext, instance string, startupCofnig *Stanza, confFn ConfFn) {
+func startVpp(tc *TcContext, runDir string, startupConfig string, confFn ConfFn) {
 	ctx, cancel := signal.NotifyContext(
 		context.Background(),
 		os.Interrupt,
@@ -68,12 +68,11 @@ func startVpp(tc *TcContext, instance string, startupCofnig *Stanza, confFn Conf
 
 	tc.mainCh <- cancel
 
-	path := fmt.Sprintf("/tmp/%s", instance)
 	log.EnableTracing(true)
 	ctx = log.WithLog(ctx, logruslogger.New(ctx, map[string]interface{}{"cmd": os.Args[0]}))
 
-	con, vppErrCh := vpphelper.StartAndDialContext(ctx, vpphelper.WithRootDir(path),
-		vpphelper.WithStanza(startupCofnig.ToString()))
+	con, vppErrCh := vpphelper.StartAndDialContext(ctx, vpphelper.WithVppConfig(startupConfig),
+		vpphelper.WithRootDir(runDir))
 	exitOnErrCh(ctx, cancel, vppErrCh)
 
 	err := confFn(ctx, con)
@@ -82,12 +81,12 @@ func startVpp(tc *TcContext, instance string, startupCofnig *Stanza, confFn Conf
 	}
 	// notify main thread that configuration is finished
 	tc.wg.Done()
-	log.FromContext(ctx).Infof("cli socket: %s/var/run/vpp/cli.sock", path)
+	log.FromContext(ctx).Infof("cli socket: %s/var/run/vpp/cli.sock", runDir)
 	<-ctx.Done()
 }
 
-func Vppcli(inst, command string) {
-	cmd := exec.Command("vppctl", "-s", fmt.Sprintf("/tmp/%s/var/run/vpp/cli.sock", inst), command)
+func Vppcli(runDir, command string) {
+	cmd := exec.Command("vppctl", "-s", fmt.Sprintf("%s/var/run/vpp/cli.sock", runDir), command)
 	o, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Default().Errorf("failed to execute command: '%s'.\n", err)
