@@ -78,7 +78,6 @@ func TestLDPreloadIperfVpp() error {
 	tc.init(2)
 	stopServerCh := make(chan struct{}, 1)
 	serverRunning := make(chan struct{}, 1)
-
 	tcFinished := make(chan struct{})
 
 	startup.
@@ -86,11 +85,14 @@ func TestLDPreloadIperfVpp() error {
 		Append("enable").
 		Append("use-app-socket-api").Close()
 
-	log.Default().Debug("starting vpps")
-	go startVpp(&tc, srvRunDir, startup.ToString(), configureLDPtest("vppsrv", "10.10.10.1/24", "1", 1))
-	go startVpp(&tc, clnRunDir, startup.ToString(), configureLDPtest("vppcln", "10.10.10.2/24", "2", 2))
+	ctx1, cancel1 := newVppContext()
+	ctx2, cancel2 := newVppContext()
+	defer cancel1()
+	defer cancel2()
 
-	cancelFns := receiveCancelFns(&tc, 2)
+	log.Default().Debug("starting vpps")
+	go startVpp(ctx1, &tc, cancel1, srvRunDir, startup.ToString(), configureLDPtest("vppsrv", "10.10.10.1/24", "1", 1))
+	go startVpp(ctx2, &tc, cancel2, clnRunDir, startup.ToString(), configureLDPtest("vppcln", "10.10.10.2/24", "2", 2))
 
 	// waiting for both vpps to finish configuration
 	tc.wg.Wait()
@@ -129,11 +131,6 @@ func TestLDPreloadIperfVpp() error {
 
 	// stop server
 	stopServerCh <- struct{}{}
-
-	// stop vpp routines
-	for _, fn := range cancelFns {
-		fn()
-	}
 	return nil
 }
 
@@ -213,15 +210,6 @@ func startWget(finished chan error, server_ip, port string) {
 	}
 	log.Default().Debugf("Client output: %s", o)
 	finished <- nil
-}
-
-// gather all cancel functions
-func receiveCancelFns(tc *TcContext, n int) []context.CancelFunc {
-	var res []context.CancelFunc
-	for i := 0; i < n; i++ {
-		res = append(res, <-tc.mainCh)
-	}
-	return res
 }
 
 // unused
@@ -413,12 +401,10 @@ func testProxyHttpTcp(instance string, stanza *Stanza, vppConf ConfFn, proxySetu
 	tc.init(1)
 
 	runDir := "/tmp/" + instance
-	go startVpp(&tc, runDir, fmt.Sprintf(configTemplate, runDir, ""), vppConf)
+	ctx, cancel := newVppContext()
+	defer cancel()
+	go startVpp(ctx, &tc, cancel, runDir, fmt.Sprintf(configTemplate, runDir, ""), vppConf)
 
-	cancelFns := receiveCancelFns(&tc, 1)
-	for _, fn := range cancelFns {
-		defer fn()
-	}
 	tc.wg.Wait()
 	fmt.Println("VPP running and configured...")
 
@@ -500,10 +486,12 @@ func TestHttpTps() error {
 	port := "8080"
 	runDir := "/tmp/vpp-tps"
 
+	ctx, cancel := newVppContext()
+	defer cancel()
+
 	log.Default().Debug("starting vpp..")
-	go startVpp(&tc, runDir, fmt.Sprintf(configTemplate, runDir, ""),
+	go startVpp(ctx, &tc, cancel, runDir, fmt.Sprintf(configTemplate, runDir, ""),
 		configureHttpTps(runDir, server_ip, port))
-	cancelFns := receiveCancelFns(&tc, 1)
 
 	tc.wg.Wait()
 
@@ -512,10 +500,6 @@ func TestHttpTps() error {
 	err := <-finished
 	if err != nil {
 		rc = err
-	}
-
-	for _, fn := range cancelFns {
-		fn()
 	}
 	return rc
 }

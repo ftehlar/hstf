@@ -41,8 +41,7 @@ type TestCase struct {
 }
 
 type TcContext struct {
-	wg     *sync.WaitGroup
-	mainCh chan context.CancelFunc
+	wg *sync.WaitGroup
 }
 
 var colorReset = "\033[0m"
@@ -57,20 +56,19 @@ func (tc *TcContext) init(nInst int) {
 	var wg sync.WaitGroup
 	wg.Add(nInst)
 	tc.wg = &wg
-	tc.mainCh = make(chan context.CancelFunc)
 }
 
-func startVpp(tc *TcContext, runDir string, startupConfig string, confFn ConfFn) {
+func newVppContext() (context.Context, context.CancelFunc) {
 	ctx, cancel := signal.NotifyContext(
 		context.Background(),
 		os.Interrupt,
 	)
-
-	tc.mainCh <- cancel
-
-	log.EnableTracing(true)
 	ctx = log.WithLog(ctx, logruslogger.New(ctx, map[string]interface{}{"cmd": os.Args[0]}))
+	return ctx, cancel
+}
 
+func startVpp(ctx context.Context, tc *TcContext, cancel context.CancelFunc, runDir, startupConfig string,
+	confFn ConfFn) {
 	con, vppErrCh := vpphelper.StartAndDialContext(ctx, vpphelper.WithVppConfig(startupConfig),
 		vpphelper.WithRootDir(runDir))
 	exitOnErrCh(ctx, cancel, vppErrCh)
