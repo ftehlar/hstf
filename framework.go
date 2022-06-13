@@ -1,4 +1,4 @@
-package main
+package hstf
 
 import (
 	"context"
@@ -15,42 +15,39 @@ import (
 	"github.com/networkservicemesh/sdk/pkg/tools/log/logruslogger"
 )
 
+const configTemplate = `unix {
+  nodaemon
+  log %[1]s/var/log/vpp/vpp.log
+  full-coredump
+  cli-listen %[1]s/var/run/vpp/cli.sock
+  runtime-dir %[1]s/var/run
+  gid vpp
+}
+
+api-trace {
+  on
+}
+
+api-segment {
+  gid vpp
+}
+
+socksvr {
+  socket-name %[1]s/var/run/vpp/api.sock
+}
+
+statseg {
+  socket-name %[1]s/var/run/vpp/stats.sock
+}
+
+%[2]s
+`
+
 type ConfFn func(context.Context, api.Connection) error
-type TestFn func() error
-
-var testMatrix = []TestDesc{
-	{TestLDPreloadIperfVpp, "2peerVeth", "LD preload iperf (VPP)"},
-	{TestIperfLinux, "tap", "iperf3 (Linux)"},
-	{TestHttpTps, "", "HTTP tps test"},
-	{TestVppProxyHttpTcp, "ns", "HTTP/TCP Vpp Proxy"},
-	{TestEnvoyProxyHttpTcp, "ns", "Envoy HTTP/TCP Proxy"},
-}
-
-type TestDesc struct {
-	fn       TestFn
-	topoName string
-	desc     string
-}
-
-type TestCase struct {
-	fn       TestFn
-	topo     *Topo
-	desc     string
-	topoName string
-	result   error
-}
 
 type TcContext struct {
 	wg *sync.WaitGroup
 }
-
-var colorReset = "\033[0m"
-var colorRed = "\033[31m"
-var colorGreen = "\033[32m"
-var colorPurple = "\033[35m"
-
-var topoBase TopoBase
-var tests []TestCase
 
 func (tc *TcContext) init(nInst int) {
 	var wg sync.WaitGroup
@@ -92,6 +89,34 @@ func Vppcli(runDir, command string) {
 	log.Default().Debugf("Command output %s", string(o))
 }
 
+func startHttpServer(running chan struct{}, done chan struct{}, addressPort, netNs string) {
+	cmd := NewCommand([]string{"./tools/http_server/http_server", addressPort}, netNs)
+	err := cmd.Start()
+	if err != nil {
+		fmt.Println("Failed to start http server")
+		return
+	}
+	running <- struct{}{}
+	<-done
+	cmd.Process.Kill()
+}
+
+func startWget(finished chan error, server_ip, port string) {
+	fname := "test_file_10M"
+	defer func() {
+		finished <- errors.New("wget error")
+	}()
+
+	cmd := exec.Command("wget", "-q", "-O", "/dev/null", server_ip+":"+port+"/"+fname)
+	o, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Default().Errorf("wget error: '%s'.\n%s", err, o)
+		return
+	}
+	log.Default().Debugf("Client output: %s", o)
+	finished <- nil
+}
+
 /* func createtempDir() string {
 	dir, err := ioutil.TempDir("/tmp", "hstf-vpp-*")
 	if err != nil {
@@ -108,25 +133,6 @@ func Vppcli(runDir, command string) {
     }
 } */
 
-func getResultString(tc *TestCase) (bool, string) {
-	if tc.result == nil {
-		return true, string(colorGreen) + "Passed" + string(colorReset)
-	}
-	return false, string(colorRed) + "Failed" + string(colorReset)
-}
-
-func printResults(tests []TestCase) {
-	color := colorGreen
-	fmt.Println("\nResults:")
-	for i, tc := range tests {
-		res, str := getResultString(&tc)
-		if !res {
-			color = colorRed
-		}
-		fmt.Printf("%d. %s%s%s\t%s\n", i, string(color), str, string(colorReset), tc.desc)
-	}
-}
-
 func exitOnErrCh(ctx context.Context, cancel context.CancelFunc, errCh <-chan error) {
 	// If we already have an error, log it and exit
 	select {
@@ -138,91 +144,4 @@ func exitOnErrCh(ctx context.Context, cancel context.CancelFunc, errCh <-chan er
 		<-errCh
 		cancel()
 	}(ctx, errCh)
-}
-
-func runAllTests(tests []TestCase) error {
-	for _, tc := range tests {
-		runSingleTest(&tc)
-	}
-	printResults(tests)
-	return nil
-}
-
-func registerTestCase(fn TestFn, desc string, topo *Topo, topoName string) {
-	tests = append(tests, TestCase{fn, topo, desc, topoName, nil})
-}
-
-func PrintTestDefinitions() {
-	for i, t := range testMatrix {
-		fmt.Printf(" %d %s [%s]\n", i, t.desc, t.topoName)
-	}
-}
-
-func PrintTests() {
-	for i, t := range tests {
-		fmt.Printf(" %d %s (%p)\n", i, t.desc, t.topo)
-	}
-}
-
-func InitFramework() error {
-	const topoDir = "topo/"
-
-	err := topoBase.LoadTopologies(topoDir)
-	if err != nil {
-		return fmt.Errorf("error on loading topology definitions: %v", err)
-	}
-
-	for _, t := range testMatrix {
-		if t.topoName != "" {
-			topo := topoBase.FindTopoByName(t.topoName)
-			if topo == nil {
-				return errors.New("topo not found")
-			}
-			registerTestCase(t.fn, t.desc, topo, t.topoName)
-		} else {
-			registerTestCase(t.fn, t.desc, nil, t.topoName)
-		}
-	}
-	return nil
-}
-
-func runSingleTest(t *TestCase) error {
-	t.result = fmt.Errorf("unspecified error")
-	if t.topo != nil {
-		fmt.Printf("Configuring topology %s for %s\n", t.topoName, t.desc)
-		err := t.topo.Configure()
-		if err != nil {
-			return fmt.Errorf("failed to prepare topology: %v", err)
-		}
-		defer t.topo.RemoveConfig()
-	} else {
-		fmt.Println("No topology defined for", t.desc)
-	}
-
-	fmt.Println(string(colorPurple) + "Starting test case " + t.desc + string(colorReset))
-	t.result = t.fn()
-	fmt.Println(string(colorPurple) + "End of test case: " + t.desc + string(colorReset))
-	_, s := getResultString(t)
-	fmt.Println(s)
-	return t.result
-}
-
-func RunTestFw(a *Args) error {
-	switch a.action {
-	case RunSingleAction:
-		if a.index >= len(tests) {
-			return fmt.Errorf("invalid test index")
-		}
-		return runSingleTest(&tests[a.index])
-	case RunAllAction:
-		return runAllTests(tests)
-	case RemoveConfigAction:
-		topo := topoBase.FindTopoByName(a.topoName)
-		if topo == nil {
-			return fmt.Errorf("topology %s not found", a.topoName)
-		}
-		topo.RemoveConfig()
-		return nil
-	}
-	return fmt.Errorf("no option specified")
 }

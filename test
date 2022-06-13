@@ -7,4 +7,5 @@ else
     exit 1
 fi
 
-sudo -E ./hstf $@
+sudo -E go test -v $@
+

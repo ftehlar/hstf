@@ -1,4 +1,4 @@
-package main
+package hstf
 
 import (
 	"errors"
@@ -184,9 +184,9 @@ func loadTopoFile(topoName string) (*Topo, error) {
 }
 func AddTap(ifName, ifAddress string) error {
 	cmd := exec.Command("ip", "tuntap", "add", ifName, "mode", "tap")
-	err := cmd.Run()
+	o, err := cmd.CombinedOutput()
 	if err != nil {
-		s := fmt.Sprintf("error creating tap %s!", ifName)
+		s := fmt.Sprintf("error creating tap %s: %v: %s", ifName, err, string(o))
 		return errors.New(s)
 	}
 
@@ -194,7 +194,7 @@ func AddTap(ifName, ifAddress string) error {
 	err = cmd.Run()
 	if err != nil {
 		DelLink(ifName)
-		s := fmt.Sprintf("error setting addr for tap %s!", ifName)
+		s := fmt.Sprintf("error setting addr for tap %s: %v", ifName, err)
 		return errors.New(s)
 	}
 
