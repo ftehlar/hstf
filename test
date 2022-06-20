@@ -7,5 +7,4 @@ else
     exit 1
 fi
 
-sudo -E go test -v $@
-
+sudo -E go test -buildvcs=false  -v $@

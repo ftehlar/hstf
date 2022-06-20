@@ -1,4 +1,4 @@
-package hstf
+package main
 
 import (
 	"io"

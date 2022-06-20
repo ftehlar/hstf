@@ -1,4 +1,4 @@
-package hstf
+package main
 
 import (
 	"context"
@@ -7,10 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"sync"
 
 	"git.fd.io/govpp.git/api"
-	"github.com/edwarnicke/vpphelper"
+	"github.com/edwarnicke/govpp/binapi/af_packet"
+	interfaces "github.com/edwarnicke/govpp/binapi/interface"
+	"github.com/edwarnicke/govpp/binapi/interface_types"
+	ip_types "github.com/edwarnicke/govpp/binapi/ip_types"
+	"github.com/edwarnicke/govpp/binapi/session"
 	"github.com/networkservicemesh/sdk/pkg/tools/log"
 	"github.com/networkservicemesh/sdk/pkg/tools/log/logruslogger"
 )
@@ -39,21 +42,9 @@ socksvr {
 statseg {
   socket-name %[1]s/var/run/vpp/stats.sock
 }
-
-%[2]s
 `
 
 type ConfFn func(context.Context, api.Connection) error
-
-type TcContext struct {
-	wg *sync.WaitGroup
-}
-
-func (tc *TcContext) init(nInst int) {
-	var wg sync.WaitGroup
-	wg.Add(nInst)
-	tc.wg = &wg
-}
 
 func newVppContext() (context.Context, context.CancelFunc) {
 	ctx, cancel := signal.NotifyContext(
@@ -64,33 +55,47 @@ func newVppContext() (context.Context, context.CancelFunc) {
 	return ctx, cancel
 }
 
-func startVpp(ctx context.Context, tc *TcContext, cancel context.CancelFunc, runDir, startupConfig string,
-	confFn ConfFn) {
-	con, vppErrCh := vpphelper.StartAndDialContext(ctx, vpphelper.WithVppConfig(startupConfig),
-		vpphelper.WithRootDir(runDir))
-	exitOnErrCh(ctx, cancel, vppErrCh)
+func configureLDPtest(ifName, interfaceAddress, namespaceId string, secret uint64) ConfFn {
+	return func(ctx context.Context,
+		vppConn api.Connection) error {
 
-	err := confFn(ctx, con)
-	if err != nil {
-		log.FromContext(ctx).Errorf("configuration failed: %s", err)
+		swIfIndex, err := configureAfPacket(ctx, vppConn, ifName, interfaceAddress)
+		if err != nil {
+			log.FromContext(ctx).Fatalf("failed to create af packet: %v", err)
+		}
+		_, er := session.NewServiceClient(vppConn).AppNamespaceAddDelV2(ctx, &session.AppNamespaceAddDelV2{
+			Secret:      secret,
+			SwIfIndex:   swIfIndex,
+			NamespaceID: namespaceId,
+		})
+		if er != nil {
+			log.FromContext(ctx).Fatal("add app namespace ", err)
+			return err
+		}
+
+		_, er1 := session.NewServiceClient(vppConn).SessionEnableDisable(ctx, &session.SessionEnableDisable{
+			IsEnable: true,
+		})
+		if er1 != nil {
+			log.FromContext(ctx).Fatalf("session enable %w", err)
+			return err
+		}
+		return nil
 	}
-	// notify main thread that configuration is finished
-	tc.wg.Done()
-	log.FromContext(ctx).Infof("cli socket: %s/var/run/vpp/cli.sock", runDir)
-	<-ctx.Done()
 }
 
-func Vppcli(runDir, command string) {
+func Vppcli(runDir, command string) error {
 	cmd := exec.Command("vppctl", "-s", fmt.Sprintf("%s/var/run/vpp/cli.sock", runDir), command)
 	o, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Default().Errorf("failed to execute command: '%s'.\n", err)
 	}
 	log.Default().Debugf("Command output %s", string(o))
+	return err
 }
 
 func startHttpServer(running chan struct{}, done chan struct{}, addressPort, netNs string) {
-	cmd := NewCommand([]string{"./tools/http_server/http_server", addressPort}, netNs)
+	cmd := NewCommand([]string{"./http_server", addressPort}, netNs)
 	err := cmd.Start()
 	if err != nil {
 		fmt.Println("Failed to start http server")
@@ -101,13 +106,14 @@ func startHttpServer(running chan struct{}, done chan struct{}, addressPort, net
 	cmd.Process.Kill()
 }
 
-func startWget(finished chan error, server_ip, port string) {
+func startWget(finished chan error, server_ip, port string, netNs string) {
 	fname := "test_file_10M"
 	defer func() {
 		finished <- errors.New("wget error")
 	}()
 
-	cmd := exec.Command("wget", "-q", "-O", "/dev/null", server_ip+":"+port+"/"+fname)
+	cmd := NewCommand([]string{"wget", "--tries=5", "-q", "-O", "/dev/null", server_ip + ":" + port + "/" + fname},
+		netNs)
 	o, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Default().Errorf("wget error: '%s'.\n%s", err, o)
@@ -115,6 +121,45 @@ func startWget(finished chan error, server_ip, port string) {
 	}
 	log.Default().Debugf("Client output: %s", o)
 	finished <- nil
+}
+
+func configureAfPacket(ctx context.Context, vppCon api.Connection,
+	name, interfaceAddress string) (interface_types.InterfaceIndex, error) {
+	ifaceClient := interfaces.NewServiceClient(vppCon)
+	afPacketCreate := &af_packet.AfPacketCreateV2{
+		UseRandomHwAddr: true,
+		HostIfName:      name,
+		NumRxQueues:     1,
+	}
+	afPacketCreateRsp, err := af_packet.NewServiceClient(vppCon).AfPacketCreateV2(ctx, afPacketCreate)
+	if err != nil {
+		log.FromContext(ctx).Fatalf("failed to create af packet: %v", err)
+		return 0, err
+	}
+	_, err = ifaceClient.SwInterfaceSetFlags(ctx, &interfaces.SwInterfaceSetFlags{
+		SwIfIndex: afPacketCreateRsp.SwIfIndex,
+		Flags:     interface_types.IF_STATUS_API_FLAG_ADMIN_UP,
+	})
+	if err != nil {
+		log.FromContext(ctx).Fatal("set interface state up failed: ", err)
+		return 0, err
+	}
+	ipPrefix, err := ip_types.ParseAddressWithPrefix(interfaceAddress)
+	if err != nil {
+		log.FromContext(ctx).Fatal("parse ip address ", err)
+		return 0, err
+	}
+	ipAddress := &interfaces.SwInterfaceAddDelAddress{
+		IsAdd:     true,
+		SwIfIndex: afPacketCreateRsp.SwIfIndex,
+		Prefix:    ipPrefix,
+	}
+	_, errx := ifaceClient.SwInterfaceAddDelAddress(ctx, ipAddress)
+	if errx != nil {
+		log.FromContext(ctx).Fatal("add ip address ", err)
+		return 0, err
+	}
+	return afPacketCreateRsp.SwIfIndex, nil
 }
 
 /* func createtempDir() string {

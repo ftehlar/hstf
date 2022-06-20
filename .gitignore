@@ -1,7 +1,9 @@
 *.swp
 
-# binary
-tools/http_server/http_server
+# binaries
+http_server
+hstf
 
 #logs
 envoy/envoy.log
+debs/

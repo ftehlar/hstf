@@ -1,4 +1,4 @@
-module hstf/hstf
+module github.com/ftehlar/hstf
 
 go 1.18
 
