@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/edwarnicke/exechelper"
 	"github.com/networkservicemesh/sdk/pkg/tools/log"
 	"github.com/stretchr/testify/suite"
 )
@@ -62,7 +63,6 @@ func (s *NsSuite) TearDownSuite() {
 func (s *Veths2Suite) TestLDPreloadIperfVpp() {
 	t := s.T()
 	var clnVclConf, srvVclConf Stanza
-	// RunCommand([]string{"docker", "volume", "create", "--name=envoy-vol"}, "")
 
 	srvInstance := "vpp-ldp-srv"
 	clnInstance := "vpp-ldp-cln"
@@ -71,8 +71,8 @@ func (s *Veths2Suite) TestLDPreloadIperfVpp() {
 	srvVcl := srvPath + "/vcl_srv.conf"
 	clnVcl := clnPath + "/vcl_cln.conf"
 
-	RunCommand([]string{"mkdir", srvPath}, "")
-	RunCommand([]string{"mkdir", clnPath}, "")
+	exechelper.Run("mkdir " + srvPath)
+	exechelper.Run("mkdir " + clnPath)
 
 	ldpreload := os.Getenv("HSTF_LDPRELOAD")
 	s.Assert().NotEqual("", ldpreload)
@@ -83,28 +83,33 @@ func (s *Veths2Suite) TestLDPreloadIperfVpp() {
 	srvCh := make(chan error, 1)
 	clnCh := make(chan error)
 
-	log.Default().Debug("starting vpps")
-	o, err := RunCommand([]string{"docker", "run", "-d", "--privileged",
-		"-v", fmt.Sprintf("/tmp/%s:/tmp", srvInstance),
-		"--network", "host", "--rm", "--name", srvInstance, "hstf/vpp"}, "")
-	fmt.Println(string(o))
-	s.Assert().Nil(err)
-	defer func() { RunCommand([]string{"docker", "stop", srvInstance}, "") }()
+	log.Default().Debug("starting VPPs")
 
-	o, err = RunCommand([]string{"docker", "run", "-d", "--privileged",
-		"-v", fmt.Sprintf("/tmp/%s:/tmp", clnInstance),
-		"--network", "host", "--rm", "--name", clnInstance, "hstf/vpp"}, "")
-	fmt.Println(string(o))
-	s.Assert().Nil(err)
-	defer func() { RunCommand([]string{"docker", "stop", clnInstance}, "") }()
+	err := dockerRun(srvInstance, fmt.Sprintf("-v /tmp/%s:/tmp", srvInstance))
+	if err != nil {
+		t.Errorf("%v", err)
+		return
+	}
+	defer func() { exechelper.Run("docker stop " + srvInstance) }()
 
-	o, err = dockerExec([]string{"/hstf", "ld-preload", "srv"}, srvInstance)
-	fmt.Println(string(o))
-	s.Assert().Nil(err)
+	err = dockerRun(clnInstance, fmt.Sprintf("-v /tmp/%s:/tmp", clnInstance))
+	if err != nil {
+		t.Errorf("%v", err)
+		return
+	}
+	defer func() { exechelper.Run("docker stop " + clnInstance) }()
 
-	o, err = dockerExec([]string{"/hstf", "ld-preload", "cln"}, clnInstance)
-	fmt.Println(string(o))
-	s.Assert().Nil(err)
+	_, err = hstfExec("ld-preload srv", srvInstance)
+	if err != nil {
+		t.Errorf("%v", err)
+		return
+	}
+
+	_, err = hstfExec("ld-preload cln", clnInstance)
+	if err != nil {
+		t.Errorf("%v", err)
+		return
+	}
 
 	err = clnVclConf.
 		NewStanza("vcl").
@@ -160,34 +165,66 @@ func (s *Veths2Suite) TestLDPreloadIperfVpp() {
 	stopServerCh <- struct{}{}
 }
 
-func dockerExec(cmd []string, instance string) ([]byte, error) {
-	c := append([]string{"docker", "exec", "-d", instance}, cmd...)
-	fmt.Println(c)
-	return RunCommand(c, "")
+func waitForSyncFile(fname string) (int, error) {
+	var rc int
+	for i := 0; i < 5; i++ {
+		f, err := os.Open(fname)
+		if err == nil {
+			defer f.Close()
+			_, e := fmt.Fscanf(f, "%d", &rc)
+			if e != nil {
+				return -1, e
+			}
+			return rc, nil
+		}
+		time.Sleep(1 * time.Second)
+	}
+	return 1, fmt.Errorf("no sync file found")
 }
 
-func testProxyHttpTcp(dockerInstance string, proxySetup func() error) error {
+// run vpphelper in docker
+func hstfExec(args string, instance string) ([]byte, error) {
+	syncFile := fmt.Sprintf("/tmp/%s/sync/rc", instance)
+	os.Remove(syncFile)
+
+	c := "docker exec -d " + instance + " /hstf " + args
+	o, err := exechelper.CombinedOutput(c)
+	if err != nil {
+		return o, err
+	}
+
+	rc, err := waitForSyncFile(syncFile)
+	if err != nil {
+		fmt.Println("failed to read sync file")
+		return o, err
+	} else {
+		if rc != 0 {
+			return o, fmt.Errorf("cmd resulted in non-zero value %d", rc)
+		}
+	}
+	return o, err
+}
+
+func dockerExec(cmd string, instance string) ([]byte, error) {
+	c := "docker exec -d " + instance + " " + cmd
+	return exechelper.CombinedOutput(c)
+}
+
+func testProxyHttpTcp(t *testing.T, dockerInstance string, proxySetup func() error) error {
 	const outputFile = "test.data"
 	const srcFile = "10M"
 	stopServer := make(chan struct{}, 1)
 	serverRunning := make(chan struct{}, 1)
 
-	// run container
-	o, err := RunCommand([]string{"docker", "run", "--cap-add=all", "-d",
-		"--privileged", "--network", "host", "--rm", "--name", dockerInstance,
-		"-v", fmt.Sprintf("envoy-vol:/tmp/%s", dockerInstance),
-		"hstf/vpp"}, "")
-	fmt.Println(string(o))
+	volumeArgs := fmt.Sprintf("-v shared-vol:/tmp/%s", dockerInstance)
+	err := dockerRun(dockerInstance, volumeArgs)
 	if err != nil {
 		return fmt.Errorf("failed to start container: %v", err)
-	} else {
-		fmt.Println("container running..")
 	}
-	defer func() { RunCommand([]string{"docker", "stop", dockerInstance}, "") }()
+	defer func() { exechelper.Run("docker stop " + dockerInstance) }()
 
 	// start & configure vpp in the container
-	o, err = dockerExec([]string{"/hstf", dockerInstance}, dockerInstance)
-	fmt.Println(string(o))
+	_, err = hstfExec(dockerInstance, dockerInstance)
 	if err != nil {
 		return fmt.Errorf("error starting vpp in container: %v", err)
 	}
@@ -197,16 +234,16 @@ func testProxyHttpTcp(dockerInstance string, proxySetup func() error) error {
 	if err := proxySetup(); err != nil {
 		return fmt.Errorf("failed to setup proxy: %v", err)
 	}
+	fmt.Println("Proxy configured...")
 
 	// create test file
-	c := []string{"truncate", "-s", srcFile, srcFile}
-	_, err = RunCommand(c, "server")
+	err = exechelper.Run(fmt.Sprintf("ip netns exec server truncate -s %s %s", srcFile, srcFile))
 	if err != nil {
 		return fmt.Errorf("failed to run truncate command")
 	}
-	defer func() {
-		os.Remove(srcFile)
-	}()
+	defer func() { os.Remove(srcFile) }()
+
+	fmt.Println("Test file created...")
 
 	go startHttpServer(serverRunning, stopServer, ":666", "server")
 	// TODO better error handling and recovery
@@ -218,17 +255,14 @@ func testProxyHttpTcp(dockerInstance string, proxySetup func() error) error {
 
 	fmt.Println("http server started...")
 
-	c = []string{"wget", "--retry-connrefused", "--retry-on-http-error=503",
-		"--tries=10", "10.0.0.2:555/" + srcFile, "-O", outputFile}
-	o, err1 := RunCommand(c, "client")
-	if err1 != nil {
-		return fmt.Errorf("failed to run wget: %v %v", err1, string(o))
+	c := fmt.Sprintf("ip netns exec client wget --retry-connrefused --retry-on-http-error=503 --tries=10 -O %s 10.0.0.2:555/%s", outputFile, srcFile)
+	err = exechelper.Run(c)
+	if err != nil {
+		return fmt.Errorf("failed to run wget: %v", err)
 	}
 	stopServer <- struct{}{}
 
-	defer func() {
-		os.Remove(outputFile)
-	}()
+	defer func() { os.Remove(outputFile) }()
 
 	if err = assertFileSize(outputFile, srcFile); err != nil {
 		return err
@@ -237,20 +271,18 @@ func testProxyHttpTcp(dockerInstance string, proxySetup func() error) error {
 }
 
 func configureVppProxy() error {
-	// configure test proxy on vpp
-	for i := 0; i < 5; i++ {
-		dockerExec([]string{"vppctl", "test", "proxy", "server", "server-uri",
-			"tcp://10.0.0.2/555", "client-uri", "tcp://10.0.1.1/666"}, "vpp-proxy")
-		// FIXME we don't know when vpp is ready
-		time.Sleep(1 * time.Second)
-	}
-	return nil
+	_, err := dockerExec("vppctl test proxy server server-uri tcp://10.0.0.2/555 client-uri tcp://10.0.1.1/666",
+		"vpp-proxy")
+	return err
 }
 
 func (s *NsSuite) TestVppProxyHttpTcp() {
+	t := s.T()
 	dockerInstance := "vpp-proxy"
-	err := testProxyHttpTcp(dockerInstance, configureVppProxy)
-	s.Assert().Nil(err)
+	err := testProxyHttpTcp(t, dockerInstance, configureVppProxy)
+	if err != nil {
+		t.Errorf("%v", err)
+	}
 }
 
 func startEnvoy(t *testing.T, dockerInstance string) error {
@@ -262,7 +294,7 @@ func startEnvoy(t *testing.T, dockerInstance string) error {
 
 	c := []string{"docker", "run", "--rm", "--name", "envoy",
 		"-v", fmt.Sprintf("%s/envoy/proxy.yaml:/etc/envoy/envoy.yaml", wd),
-		"-v", fmt.Sprintf("envoy-vol:/tmp/%s", dockerInstance),
+		"-v", fmt.Sprintf("shared-vol:/tmp/%s", dockerInstance),
 		"-v", fmt.Sprintf("%s/envoy:/tmp", wd),
 		"-e", "VCL_CONFIG=/tmp/vcl.conf",
 		"envoyproxy/envoy-contrib:v1.21-latest"}
@@ -301,16 +333,19 @@ func startEnvoy(t *testing.T, dockerInstance string) error {
 }
 
 func (s *NsSuite) TestEnvoyProxyHttpTcp() {
-	RunCommand([]string{"docker", "volume", "create", "--name=envoy-vol"}, "")
+	t := s.T()
+	exechelper.Run("docker volume create --name=shared-vol")
 	defer func() {
-		RunCommand([]string{"docker", "stop", "envoy"}, "")
+		exechelper.Run("docker stop envoy")
 	}()
 
 	dockerInstance := "vpp-envoy"
-	err := testProxyHttpTcp(dockerInstance, func() error {
-		return startEnvoy(s.T(), dockerInstance)
+	err := testProxyHttpTcp(t, dockerInstance, func() error {
+		return startEnvoy(t, dockerInstance)
 	})
-	s.Assert().Nil(err)
+	if err != nil {
+		t.Errorf("%v", err)
+	}
 }
 
 func setupSuite(s *suite.Suite, topo string) func() {
@@ -335,6 +370,17 @@ func setupSuite(s *suite.Suite, topo string) func() {
 	}
 }
 
+func dockerRun(instance, args string) error {
+	exechelper.Run(fmt.Sprintf("mkdir -p /tmp/%s/sync", instance))
+	syncPath := fmt.Sprintf("-v /tmp/%s/sync:/tmp/sync", instance)
+	cmd := "docker run --cap-add=all -d --privileged --network host --rm "
+	cmd += syncPath
+	cmd += " " + args
+	cmd += " --name " + instance + " hstf/vpp"
+	fmt.Println(cmd)
+	return exechelper.Run(cmd)
+}
+
 func (s *NsSuite) TestHttpTps() {
 	t := s.T()
 	finished := make(chan error, 1)
@@ -344,22 +390,26 @@ func (s *NsSuite) TestHttpTps() {
 
 	t.Log("starting vpp..")
 
-	o, err := RunCommand([]string{"docker", "run", "--cap-add=all", "-d",
-		"--privileged", "--network", "host", "--rm", "--name", dockerInstance,
-		"hstf/vpp"}, "")
-	fmt.Println(string(o))
-	s.Assert().Nil(err)
-	defer func() { RunCommand([]string{"docker", "stop", dockerInstance}, "") }()
+	err := dockerRun(dockerInstance, "")
+	if err != nil {
+		t.Errorf("%v", err)
+		return
+	}
+	defer func() { exechelper.Run("docker stop " + dockerInstance) }()
 
 	// start & configure vpp in the container
-	o, err = dockerExec([]string{"/hstf", dockerInstance}, dockerInstance)
-	fmt.Println(string(o))
-	s.Assert().Nil(err)
+	_, err = hstfExec(dockerInstance, dockerInstance)
+	if err != nil {
+		t.Errorf("%v", err)
+		return
+	}
 
 	go startWget(finished, server_ip, port, "client")
 	// wait for client
 	err = <-finished
-	s.Assert().Nil(err)
+	if err != nil {
+		t.Errorf("%v", err)
+	}
 }
 
 func assertFileSize(f1, f2 string) error {
@@ -467,8 +517,4 @@ func TestVeths2(t *testing.T) {
 	var m Veths2Suite
 	suite.Run(t, &m)
 
-}
-
-func TestDocker(t *testing.T) {
-	t.Log("VPP in docker test")
 }

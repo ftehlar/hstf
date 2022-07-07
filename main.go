@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 
 	"git.fd.io/govpp.git/api"
 	"git.fd.io/govpp.git/binapi/session"
+	"github.com/edwarnicke/exechelper"
 	"github.com/edwarnicke/vpphelper"
 	"github.com/networkservicemesh/sdk/pkg/tools/log"
 )
@@ -29,27 +31,62 @@ func configureProxyTcp(ifName0, ipAddr0, ifName1, ipAddr1 string) ConfFn {
 	}
 }
 
+func writeSyncFile(rc int) error {
+	syncFile := "/tmp/sync/rc"
+	_, err := os.Open(syncFile)
+	if err != nil {
+		// expecting the file does not exist
+		f, e := os.Create(syncFile)
+		if e != nil {
+			return fmt.Errorf("failed to open sync file")
+		}
+		defer f.Close()
+		f.Write([]byte(strconv.Itoa(rc)))
+	} else {
+		return fmt.Errorf("sync file exists, delete the file frst")
+	}
+	return nil
+}
+
 func main() {
+	var rc int
 	if len(os.Args) == 0 {
 		fmt.Println("args required")
 		return
 	}
 
+	// process non-vpp arguments first
 	if os.Args[1] == "rm" {
 		var topoBase TopoBase
 		err := topoBase.LoadTopologies("topo/")
 		if err != nil {
 			fmt.Printf("falied to load topologies: %v\n", err)
-			return
+			os.Exit(1)
 		}
 		topo := topoBase.FindTopoByName(os.Args[2])
 		if topo == nil {
 			fmt.Printf("topology %s not found", os.Args[2])
-			return
+			os.Exit(1)
 		}
 		topo.RemoveConfig()
-	} else if os.Args[1] == "vpp-proxy" {
+		os.Exit(0)
+	}
 
+	// run vpp + configure
+	err := processArgs()
+	if err != nil {
+		rc = 1
+	} else {
+		rc = 0
+	}
+	err = writeSyncFile(rc)
+	if err != nil {
+		fmt.Printf("failed to write to sync file: %v", err)
+	}
+}
+
+func processArgs() error {
+	if os.Args[1] == "vpp-proxy" {
 		ctx, cancel := newVppContext()
 		defer cancel()
 
@@ -59,8 +96,9 @@ func main() {
 		confFn := configureProxyTcp("vpp0", "10.0.0.2/24", "vpp1", "10.0.1.2/24")
 		err := confFn(ctx, con)
 		if err != nil {
-			log.FromContext(ctx).Errorf("configuration failed: %s", err)
+			return fmt.Errorf("configuration failed; %v", err)
 		}
+		writeSyncFile(0)
 		<-ctx.Done()
 
 	} else if os.Args[1] == "vpp-envoy" {
@@ -82,13 +120,13 @@ func main() {
 		confFn := configureProxyTcp("vpp0", "10.0.0.2/24", "vpp1", "10.0.1.2/24")
 		err := confFn(ctx, con)
 		if err != nil {
-			log.FromContext(ctx).Errorf("configuration failed: %v", err)
+			return fmt.Errorf("configuration failed: %v", err)
 		}
-		_, err0 := RunCommand([]string{"chmod", "777", "-R",
-			"/tmp/vpp-envoy"}, "")
+		err0 := exechelper.Run("chmod 777 -R /tmp/vpp-envoy")
 		if err0 != nil {
-			log.FromContext(ctx).Errorf("setting permissions failed: %v", err)
+			return fmt.Errorf("setting permissions failed: %v", err)
 		}
+		writeSyncFile(0)
 		<-ctx.Done()
 	} else if os.Args[1] == "http-tps" {
 		ctx, cancel := newVppContext()
@@ -100,17 +138,17 @@ func main() {
 		confFn := configureProxyTcp("vpp0", "10.0.0.2/24", "vpp1", "10.0.1.2/24")
 		err := confFn(ctx, con)
 		if err != nil {
-			log.FromContext(ctx).Errorf("configuration failed: %v", err)
+			return fmt.Errorf("configuration failed: %v", err)
 		}
 
 		_, err = session.NewServiceClient(con).SessionEnableDisable(ctx, &session.SessionEnableDisable{
 			IsEnable: true,
 		})
 		if err != nil {
-			log.FromContext(ctx).Errorf("configuration failed: %s", err)
-			os.Exit(1)
+			return fmt.Errorf("configuration failed: %s", err)
 		}
 		Vppcli("", "http tps uri tcp://0.0.0.0/8080")
+		writeSyncFile(0)
 		<-ctx.Done()
 	} else if os.Args[1] == "ld-preload" {
 		var startup Stanza
@@ -134,8 +172,10 @@ func main() {
 		}
 		err := fn(ctx, con)
 		if err != nil {
-			log.FromContext(ctx).Errorf("configuration failed: %s", err)
+			return fmt.Errorf("configuration failed: %s", err)
 		}
+		writeSyncFile(0)
 		<-ctx.Done()
 	}
+	return nil
 }
