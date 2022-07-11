@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -256,7 +257,7 @@ func testProxyHttpTcp(t *testing.T, dockerInstance string, proxySetup func() err
 	fmt.Println("http server started...")
 
 	c := fmt.Sprintf("ip netns exec client wget --retry-connrefused --retry-on-http-error=503 --tries=10 -O %s 10.0.0.2:555/%s", outputFile, srcFile)
-	err = exechelper.Run(c)
+	_, err = exechelper.CombinedOutput(c)
 	if err != nil {
 		return fmt.Errorf("failed to run wget: %v", err)
 	}
@@ -273,7 +274,10 @@ func testProxyHttpTcp(t *testing.T, dockerInstance string, proxySetup func() err
 func configureVppProxy() error {
 	_, err := dockerExec("vppctl test proxy server server-uri tcp://10.0.0.2/555 client-uri tcp://10.0.1.1/666",
 		"vpp-proxy")
-	return err
+	if err != nil {
+		return fmt.Errorf("error while configuring vpp proxy test: %v", err)
+	}
+	return nil
 }
 
 func (s *NsSuite) TestVppProxyHttpTcp() {
@@ -285,11 +289,12 @@ func (s *NsSuite) TestVppProxyHttpTcp() {
 	}
 }
 
-func startEnvoy(t *testing.T, dockerInstance string) error {
+func startEnvoy(ctx context.Context, dockerInstance string) <-chan error {
 	errCh := make(chan error)
 	wd, err := os.Getwd()
 	if err != nil {
-		return err
+		errCh <- err
+		return errCh
 	}
 
 	c := []string{"docker", "run", "--rm", "--name", "envoy",
@@ -302,33 +307,52 @@ func startEnvoy(t *testing.T, dockerInstance string) error {
 
 	go func(errCh chan error) {
 		count := 0
-		for ; count < 5; count++ {
-			cmd := NewCommand(c, "")
+		var cmd *exec.Cmd
+		for ; ; count++ {
+			cmd = NewCommand(c, "")
 			err = cmd.Start()
-			if err != nil {
-				continue
+			if err == nil {
+				break
 			}
-			err = cmd.Wait()
-			if err != nil {
-				fmt.Println(err)
-				continue
+			if count > 5 {
+				errCh <- fmt.Errorf("Failed to start envoy docker after %d attempts", count)
+				return
 			}
 		}
-		errCh <- fmt.Errorf("failed to start docker after %d attempts: %v", count, err)
-	}(errCh)
 
-	// if there is already an error in the channel, capture it
+		err = cmd.Wait()
+		if err != nil {
+			errCh <- fmt.Errorf("failed to start docker: %v", err)
+			return
+		}
+		<-ctx.Done()
+	}(errCh)
+	return errCh
+}
+
+func setupEnvoy(t *testing.T, ctx context.Context, dockerInstance string) error {
+	errCh := startEnvoy(ctx, dockerInstance)
 	select {
 	case err := <-errCh:
-		fmt.Printf("error while starting envoy: %v", err)
 		return err
 	default:
 	}
 
-	go func(errCh <-chan error) {
-		err := <-errCh
-		fmt.Printf("error while starting envoy: %v", err)
-	}(errCh)
+	go func(ctx context.Context, errCh <-chan error) {
+		for {
+			select {
+			// handle cancel() call from outside to gracefully stop the routine
+			case <-ctx.Done():
+				return
+			default:
+				select {
+				case err := <-errCh:
+					fmt.Printf("error while running envoy: %v", err)
+				default:
+				}
+			}
+		}
+	}(ctx, errCh)
 	return nil
 }
 
@@ -339,13 +363,16 @@ func (s *NsSuite) TestEnvoyProxyHttpTcp() {
 		exechelper.Run("docker stop envoy")
 	}()
 
+	ctx, cancel := context.WithCancel(context.Background())
+
 	dockerInstance := "vpp-envoy"
 	err := testProxyHttpTcp(t, dockerInstance, func() error {
-		return startEnvoy(t, dockerInstance)
+		return setupEnvoy(t, ctx, dockerInstance)
 	})
 	if err != nil {
 		t.Errorf("%v", err)
 	}
+	cancel()
 }
 
 func setupSuite(s *suite.Suite, topo string) func() {
