@@ -5,6 +5,6 @@ build:
 	go build .
 
 docker:
-	docker build -t hstf/vpp -f Dockerfile.vpp .
+	bash ./script/build.sh
 
 .PHONY: docker

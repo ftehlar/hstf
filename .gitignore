@@ -6,4 +6,4 @@ hstf
 
 #logs
 envoy/envoy.log
-debs/
+vpp-data/

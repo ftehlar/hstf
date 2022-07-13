@@ -13,13 +13,6 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
-type NoTopoSuite struct {
-	suite.Suite
-}
-
-func (s *NoTopoSuite) SetupSuite()    {}
-func (s *NoTopoSuite) TearDownSuite() {}
-
 type TapSuite struct {
 	suite.Suite
 	teardownSuite func()
@@ -523,11 +516,6 @@ func (s *TapSuite) TestLinuxIperf() {
 		s.Failf("client", "%v", err)
 	}
 	t.Log("Test completed")
-}
-
-func TestNoTopo(t *testing.T) {
-	var m NoTopoSuite
-	suite.Run(t, &m)
 }
 
 func TestTapSuite(t *testing.T) {
