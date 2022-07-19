@@ -12,7 +12,7 @@ lib=vpp-data/lib
 
 mkdir -p ${bin} ${lib} || true
 
-cp ${VPP_WS}/build-root/build-vpp_debug-native/vpp/bin/{vpp,vppctl} ${bin}
+cp ${VPP_WS}/build-root/build-vpp_debug-native/vpp/bin/* ${bin}
 cp -r ${VPP_WS}/build-root/build-vpp_debug-native/vpp/lib/x86_64-linux-gnu/* ${lib}
 
 docker build -t hstf/vpp -f Dockerfile.vpp .

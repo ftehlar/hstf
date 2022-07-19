@@ -42,7 +42,20 @@ socksvr {
 statseg {
   socket-name %[1]s/var/run/vpp/stats.sock
 }
+
+plugins {
+	plugin unittest_plugin.so { enable }
+    plugin dpdk_plugin.so { disable }
+    plugin crypto_aesni_plugin.so { enable }
+    plugin quic_plugin.so { enable }
+}
+
 `
+
+type SyncResult struct {
+	Code int
+	Desc string
+}
 
 type ConfFn func(context.Context, api.Connection) error
 

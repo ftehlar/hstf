@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"os/exec"
 	"testing"
@@ -52,6 +54,72 @@ func (s *NsSuite) SetupSuite() {
 
 func (s *NsSuite) TearDownSuite() {
 	s.teardownSuite()
+}
+
+func (s *Veths2Suite) TestVclEcho() {
+	t := s.T()
+
+	exechelper.Run("docker volume create --name=echo-srv-vol")
+	exechelper.Run("docker volume create --name=echo-cln-vol")
+
+	srvInstance := "vpp-echo-srv"
+	clnInstance := "vpp-echo-cln"
+	echoSrv := "echo-srv"
+	echoCln := "echo-cln"
+
+	err := dockerRun(srvInstance, "-v echo-srv-vol:/tmp/ld-preload")
+	if err != nil {
+		t.Errorf("%v", err)
+		return
+	}
+	defer func() { exechelper.Run("docker stop " + srvInstance) }()
+
+	err = dockerRun(clnInstance, "-v echo-cln-vol:/tmp/ld-preload")
+	if err != nil {
+		t.Errorf("%v", err)
+		return
+	}
+	defer func() { exechelper.Run("docker stop " + clnInstance) }()
+
+	err = dockerRun(echoSrv, fmt.Sprintf("-v echo-srv-vol:/tmp/%s", echoSrv))
+	if err != nil {
+		t.Errorf("%v", err)
+		return
+	}
+	defer func() { exechelper.Run("docker stop " + echoSrv) }()
+
+	err = dockerRun(echoCln, fmt.Sprintf("-v echo-cln-vol:/tmp/%s", echoCln))
+	if err != nil {
+		t.Errorf("%v", err)
+		return
+	}
+	defer func() { exechelper.Run("docker stop " + echoCln) }()
+
+	_, err = hstfExec("ld-preload srv", srvInstance)
+	if err != nil {
+		t.Errorf("%v", err)
+		return
+	}
+
+	_, err = hstfExec("ld-preload cln", clnInstance)
+	if err != nil {
+		t.Errorf("%v", err)
+		return
+	}
+
+	// run server app
+	_, err = hstfExec("echo-server", echoSrv)
+	if err != nil {
+		t.Errorf("%v", err)
+		return
+	}
+
+	o, err := hstfExec("echo-client", echoCln)
+	if err != nil {
+		t.Errorf("%v", err)
+		return
+	}
+	fmt.Print(string(o))
 }
 
 func (s *Veths2Suite) TestLDPreloadIperfVpp() {
@@ -159,21 +227,27 @@ func (s *Veths2Suite) TestLDPreloadIperfVpp() {
 	stopServerCh <- struct{}{}
 }
 
-func waitForSyncFile(fname string) (int, error) {
-	var rc int
+func waitForSyncFile(fname string) (*SyncResult, error) {
+	var res SyncResult
+
 	for i := 0; i < 5; i++ {
 		f, err := os.Open(fname)
 		if err == nil {
 			defer f.Close()
-			_, e := fmt.Fscanf(f, "%d", &rc)
-			if e != nil {
-				return -1, e
+
+			data, err := ioutil.ReadFile(fname)
+			if err != nil {
+				return nil, fmt.Errorf("read error: %v", err)
 			}
-			return rc, nil
+			err = json.Unmarshal(data, &res)
+			if err != nil {
+				return nil, fmt.Errorf("json unmarshal error: %v", err)
+			}
+			return &res, nil
 		}
 		time.Sleep(1 * time.Second)
 	}
-	return 1, fmt.Errorf("no sync file found")
+	return nil, fmt.Errorf("no sync file found")
 }
 
 // run vpphelper in docker
@@ -187,13 +261,12 @@ func hstfExec(args string, instance string) ([]byte, error) {
 		return o, err
 	}
 
-	rc, err := waitForSyncFile(syncFile)
+	res, err := waitForSyncFile(syncFile)
 	if err != nil {
-		fmt.Println("failed to read sync file")
-		return o, err
+		return o, fmt.Errorf("failed to read sync file: %v", err)
 	} else {
-		if rc != 0 {
-			return o, fmt.Errorf("cmd resulted in non-zero value %d", rc)
+		if res.Code != 0 {
+			return o, fmt.Errorf("cmd resulted in non-zero value %d: %s", res.Code, res.Desc)
 		}
 	}
 	return o, err

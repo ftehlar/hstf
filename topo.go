@@ -173,15 +173,15 @@ func loadTopoFile(topoName string) (*Topo, error) {
 
 	data, err := ioutil.ReadFile(topoName)
 	if err != nil {
-		return nil, errors.New("read error")
+		return nil, fmt.Errorf("read error: %v", err)
 	}
 
 	if err := config.Parse(data); err != nil {
-		fmt.Printf("read err %s\n", err)
-		return nil, errors.New("error parsing topology data")
+		return nil, fmt.Errorf("error parsing topology data: %v", err)
 	}
 	return &config, nil
 }
+
 func AddTap(ifName, ifAddress string) error {
 	cmd := exec.Command("ip", "tuntap", "add", ifName, "mode", "tap")
 	o, err := cmd.CombinedOutput()
