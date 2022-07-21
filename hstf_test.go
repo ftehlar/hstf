@@ -117,9 +117,8 @@ func (s *Veths2Suite) TestVclEcho() {
 	o, err := hstfExec("echo-client", echoCln)
 	if err != nil {
 		t.Errorf("%v", err)
-		return
 	}
-	fmt.Print(string(o))
+	fmt.Println(o)
 }
 
 func (s *Veths2Suite) TestLDPreloadIperfVpp() {
@@ -227,10 +226,10 @@ func (s *Veths2Suite) TestLDPreloadIperfVpp() {
 	stopServerCh <- struct{}{}
 }
 
-func waitForSyncFile(fname string) (*SyncResult, error) {
-	var res SyncResult
+func waitForSyncFile(fname string) (*JsonResult, error) {
+	var res JsonResult
 
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 60; i++ {
 		f, err := os.Open(fname)
 		if err == nil {
 			defer f.Close()
@@ -251,17 +250,19 @@ func waitForSyncFile(fname string) (*SyncResult, error) {
 }
 
 // run vpphelper in docker
-func hstfExec(args string, instance string) ([]byte, error) {
+func hstfExec(args string, instance string) (string, error) {
 	syncFile := fmt.Sprintf("/tmp/%s/sync/rc", instance)
 	os.Remove(syncFile)
 
 	c := "docker exec -d " + instance + " /hstf " + args
-	o, err := exechelper.CombinedOutput(c)
+	err := exechelper.Run(c)
 	if err != nil {
-		return o, err
+		return "", err
 	}
 
 	res, err := waitForSyncFile(syncFile)
+	o := res.StdOutput + res.ErrOutput
+
 	if err != nil {
 		return o, fmt.Errorf("failed to read sync file: %v", err)
 	} else {

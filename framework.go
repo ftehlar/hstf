@@ -53,8 +53,17 @@ plugins {
 `
 
 type SyncResult struct {
-	Code int
-	Desc string
+	Err       error
+	Desc      string
+	ErrOutput string
+	StdOutput string
+}
+
+type JsonResult struct {
+	Code      int
+	Desc      string
+	ErrOutput string
+	StdOutput string
 }
 
 type ConfFn func(context.Context, api.Connection) error

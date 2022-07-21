@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -31,14 +32,24 @@ func configureProxyTcp(ifName0, ipAddr0, ifName1, ipAddr1 string) ConfFn {
 	}
 }
 
-func writeSyncFile(rc int, msg string) error {
+func writeSyncFile(res *SyncResult) error {
 	syncFile := "/tmp/sync/rc"
 
-	res := SyncResult{Code: rc, Desc: msg}
-	str, err := json.Marshal(res)
+	var jsonRes JsonResult
+
+	jsonRes.ErrOutput = res.ErrOutput
+	jsonRes.StdOutput = res.StdOutput
+	if res.Err != nil {
+		jsonRes.Code = 1
+		jsonRes.Desc = fmt.Sprintf(res.Desc+":%v", res.Err)
+	} else {
+		jsonRes.Code = 0
+	}
+
+	str, err := json.Marshal(jsonRes)
 
 	if err != nil {
-		return fmt.Errorf("error marshaling result data! %v", err)
+		return fmt.Errorf("error marshaling json result data! %v", err)
 	}
 
 	_, err = os.Open(syncFile)
@@ -79,20 +90,25 @@ func main() {
 		os.Exit(0)
 	}
 
-	var wErr error
 	// run vpp + configure
-	err := processArgs()
+	var err error
+	res := processArgs()
+	err = writeSyncFile(res)
 	if err != nil {
-		wErr = writeSyncFile(1, "unspecified error")
-	} else {
-		wErr = writeSyncFile(0, "")
-	}
-	if wErr != nil {
-		fmt.Printf("failed to write to sync file: %v", err)
+		fmt.Printf("failed to write to sync file: %v\n", err)
 	}
 }
 
-func processArgs() error {
+func newResult(err error, desc, outBuf, errBuf string) *SyncResult {
+	return &SyncResult{
+		Err:       err,
+		StdOutput: outBuf,
+		ErrOutput: errBuf,
+	}
+}
+
+func processArgs() *SyncResult {
+
 	if os.Args[1] == "vpp-proxy" {
 		ctx, cancel := newVppContext()
 		defer cancel()
@@ -103,9 +119,9 @@ func processArgs() error {
 		confFn := configureProxyTcp("vpp0", "10.0.0.2/24", "vpp1", "10.0.1.2/24")
 		err := confFn(ctx, con)
 		if err != nil {
-			return fmt.Errorf("configuration failed; %v", err)
+			return newResult(err, "configuration failed", "", "")
 		}
-		writeSyncFile(0, "")
+		writeSyncFile(newResult(nil, "", "", ""))
 		<-ctx.Done()
 
 	} else if os.Args[1] == "vpp-envoy" {
@@ -127,13 +143,13 @@ func processArgs() error {
 		confFn := configureProxyTcp("vpp0", "10.0.0.2/24", "vpp1", "10.0.1.2/24")
 		err := confFn(ctx, con)
 		if err != nil {
-			return fmt.Errorf("configuration failed: %v", err)
+			return newResult(err, "configuration failed", "", "")
 		}
 		err0 := exechelper.Run("chmod 777 -R /tmp/vpp-envoy")
 		if err0 != nil {
-			return fmt.Errorf("setting permissions failed: %v", err)
+			return newResult(err, "setting permissions failed", "", "")
 		}
-		writeSyncFile(0, "")
+		writeSyncFile(newResult(nil, "", "", ""))
 		<-ctx.Done()
 	} else if os.Args[1] == "http-tps" {
 		ctx, cancel := newVppContext()
@@ -145,17 +161,17 @@ func processArgs() error {
 		confFn := configureProxyTcp("vpp0", "10.0.0.2/24", "vpp1", "10.0.1.2/24")
 		err := confFn(ctx, con)
 		if err != nil {
-			return fmt.Errorf("configuration failed: %v", err)
+			return newResult(err, "configuration failed", "", "")
 		}
 
 		_, err = session.NewServiceClient(con).SessionEnableDisable(ctx, &session.SessionEnableDisable{
 			IsEnable: true,
 		})
 		if err != nil {
-			return fmt.Errorf("configuration failed: %s", err)
+			return newResult(err, "configuration failed", "", "")
 		}
 		Vppcli("", "http tps uri tcp://0.0.0.0/8080")
-		writeSyncFile(0, "")
+		writeSyncFile(newResult(nil, "", "", ""))
 		<-ctx.Done()
 	} else if os.Args[1] == "ld-preload" {
 		var startup Stanza
@@ -179,26 +195,26 @@ func processArgs() error {
 		}
 		err := fn(ctx, con)
 		if err != nil {
-			return fmt.Errorf("configuration failed: %s", err)
+			return newResult(err, "configuration failed", "", "")
 		}
-		writeSyncFile(0, "")
+		writeSyncFile(newResult(nil, "", "", ""))
 		<-ctx.Done()
 	} else if os.Args[1] == "echo-server" {
 		errCh := exechelper.Start("vpp_echo json server log=100 socket-name /tmp/echo-srv/var/run/app_ns_sockets/1 uri quic://10.10.10.1/12344 nthreads 1 mq-size 16384 nclients 1 quic-streams 1 time sconnect:lastbyte fifo-size 4M TX=0 RX=10G use-app-socket-api")
 		select {
 		case err := <-errCh:
-			writeSyncFile(1, fmt.Sprintf("%v", err))
+			writeSyncFile(newResult(err, "echo_server: ", "", ""))
 		default:
 		}
-		writeSyncFile(0, "")
+		writeSyncFile(newResult(nil, "", "", ""))
 	} else if os.Args[1] == "echo-client" {
-		errCh := exechelper.Start("vpp_echo client log=100 socket-name /tmp/echo-cln/run/app_ns_sockets/2 use-app-socket-api uri quic://10.10.10.1/12344")
-		select {
-		case err := <-errCh:
-			writeSyncFile(1, fmt.Sprintf("%v", err))
-		default:
-		}
-		writeSyncFile(0, "")
+		outBuff := bytes.NewBuffer([]byte{})
+		errBuff := bytes.NewBuffer([]byte{})
+
+		err := exechelper.Run("vpp_echo client log=100 socket-name /tmp/echo-cln/var/run/app_ns_sockets/2 use-app-socket-api uri quic://10.10.10.1/12344",
+			exechelper.WithStdout(outBuff), exechelper.WithStderr(errBuff))
+
+		return newResult(err, "", string(outBuff.String()), string(errBuff.String()))
 	}
 	return nil
 }
