@@ -47,7 +47,6 @@ func writeSyncFile(res *SyncResult) error {
 	}
 
 	str, err := json.Marshal(jsonRes)
-
 	if err != nil {
 		return fmt.Errorf("error marshaling json result data! %v", err)
 	}
@@ -200,7 +199,8 @@ func processArgs() *SyncResult {
 		writeSyncFile(newResult(nil, "", "", ""))
 		<-ctx.Done()
 	} else if os.Args[1] == "echo-server" {
-		errCh := exechelper.Start("vpp_echo json server log=100 socket-name /tmp/echo-srv/var/run/app_ns_sockets/1 uri quic://10.10.10.1/12344 nthreads 1 mq-size 16384 nclients 1 quic-streams 1 time sconnect:lastbyte fifo-size 4M TX=0 RX=10G use-app-socket-api")
+		cmd := fmt.Sprintf("vpp_echo json server log=100 socket-name /tmp/echo-srv/var/run/app_ns_sockets/1 use-app-socket-api uri %s://10.10.10.1/12344", os.Args[2])
+		errCh := exechelper.Start(cmd)
 		select {
 		case err := <-errCh:
 			writeSyncFile(newResult(err, "echo_server: ", "", ""))
@@ -211,8 +211,10 @@ func processArgs() *SyncResult {
 		outBuff := bytes.NewBuffer([]byte{})
 		errBuff := bytes.NewBuffer([]byte{})
 
-		err := exechelper.Run("vpp_echo client log=100 socket-name /tmp/echo-cln/var/run/app_ns_sockets/2 use-app-socket-api uri quic://10.10.10.1/12344",
-			exechelper.WithStdout(outBuff), exechelper.WithStderr(errBuff))
+		cmd := fmt.Sprintf("vpp_echo client log=100 socket-name /tmp/echo-cln/var/run/app_ns_sockets/2 use-app-socket-api uri %s://10.10.10.1/12344", os.Args[2])
+		err := exechelper.Run(cmd,
+			exechelper.WithStdout(outBuff), exechelper.WithStderr(errBuff),
+			exechelper.WithStdout(os.Stdout), exechelper.WithStderr(os.Stderr))
 
 		return newResult(err, "", string(outBuff.String()), string(errBuff.String()))
 	}

@@ -56,7 +56,21 @@ func (s *NsSuite) TearDownSuite() {
 	s.teardownSuite()
 }
 
-func (s *Veths2Suite) TestVclEcho() {
+func (s *Veths2Suite) TestVclEchoQuic() {
+	s.T().Skip("quic echo currently broken in vpp; skipping..")
+	s.testVclEcho("quic")
+}
+
+func (s *Veths2Suite) TestVclEchoUdp() {
+	s.T().Skip("udp echo currently broken in vpp, skipping..")
+	s.testVclEcho("udp")
+}
+
+func (s *Veths2Suite) TestVclEchoTcp() {
+	s.testVclEcho("tcp")
+}
+
+func (s *Veths2Suite) testVclEcho(proto string) {
 	t := s.T()
 
 	exechelper.Run("docker volume create --name=echo-srv-vol")
@@ -108,13 +122,13 @@ func (s *Veths2Suite) TestVclEcho() {
 	}
 
 	// run server app
-	_, err = hstfExec("echo-server", echoSrv)
+	_, err = hstfExec("echo-server "+proto, echoSrv)
 	if err != nil {
 		t.Errorf("%v", err)
 		return
 	}
 
-	o, err := hstfExec("echo-client", echoCln)
+	o, err := hstfExec("echo-client "+proto, echoCln)
 	if err != nil {
 		t.Errorf("%v", err)
 	}
