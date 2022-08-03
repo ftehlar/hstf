@@ -76,14 +76,14 @@ func newVppContext() (context.Context, context.CancelFunc) {
 	return ctx, cancel
 }
 
-func Vppcli(runDir, command string) error {
+func Vppcli(runDir, command string) (string, error) {
 	cmd := exec.Command("vppctl", "-s", fmt.Sprintf("%s/var/run/vpp/cli.sock", runDir), command)
 	o, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Default().Errorf("failed to execute command: '%s'.\n", err)
 	}
 	log.Default().Debugf("Command output %s", string(o))
-	return err
+	return string(o), err
 }
 
 func startHttpServer(running chan struct{}, done chan struct{}, addressPort, netNs string) {

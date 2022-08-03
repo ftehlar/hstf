@@ -110,6 +110,10 @@ func okResult() *SyncResult {
 	return newResult(nil, "", "", "")
 }
 
+func okResultWithStdout(s string) *SyncResult {
+	return newResult(nil, "", s, "")
+}
+
 func configure2vethsTopo(ifName, interfaceAddress, namespaceId string, secret uint64) ConfFn {
 	return func(ctx context.Context,
 		vppConn api.Connection) error {
@@ -251,11 +255,11 @@ func processArgs() *SyncResult {
 
 		return newResult(err, "", string(outBuff.String()), string(errBuff.String()))
 	} else if os.Args[1] == "echo-srv-internal" {
-		Vppcli("/tmp/2veths", "test echo server uri tcp://10.10.10.1/1234")
-		return okResult()
+		o, _ := Vppcli("/tmp/2veths", "test echo server uri tcp://10.10.10.1/1234")
+		return okResultWithStdout(o)
 	} else if os.Args[1] == "echo-cln-internal" {
-		Vppcli("/tmp/2veths", "test echo client uri tcp://10.10.10.1/1234")
-		return okResult()
+		o, _ := Vppcli("/tmp/2veths", "test echo client uri tcp://10.10.10.1/1234")
+		return okResultWithStdout(o)
 	}
 	return nil
 }
