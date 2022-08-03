@@ -56,6 +56,50 @@ func (s *NsSuite) TearDownSuite() {
 	s.teardownSuite()
 }
 
+func (s *Veths2Suite) TestEchoBuiltin() {
+	t := s.T()
+	srvInstance := "echo-srv-internal"
+	clnInstance := "echo-cln-internal"
+	err := dockerRun(srvInstance, "")
+	if err != nil {
+		t.Errorf("%v", err)
+		return
+	}
+	defer func() { exechelper.Run("docker stop " + srvInstance) }()
+
+	err = dockerRun(clnInstance, "")
+	if err != nil {
+		t.Errorf("%v", err)
+		return
+	}
+	defer func() { exechelper.Run("docker stop " + clnInstance) }()
+
+	_, err = hstfExec("2veths srv", srvInstance)
+	if err != nil {
+		t.Errorf("%v", err)
+		return
+	}
+
+	_, err = hstfExec("2veths cln", clnInstance)
+	if err != nil {
+		t.Errorf("%v", err)
+		return
+	}
+
+	_, err = hstfExec("echo-srv-internal", srvInstance)
+	if err != nil {
+		t.Errorf("%v", err)
+		return
+	}
+
+	o, err := hstfExec("echo-cln-internal", clnInstance)
+	if err != nil {
+		t.Errorf("%v", err)
+		return
+	}
+	fmt.Println(o)
+}
+
 func (s *Veths2Suite) TestVclEchoQuic() {
 	s.T().Skip("quic echo currently broken in vpp; skipping..")
 	s.testVclEcho("quic")
@@ -81,14 +125,14 @@ func (s *Veths2Suite) testVclEcho(proto string) {
 	echoSrv := "echo-srv"
 	echoCln := "echo-cln"
 
-	err := dockerRun(srvInstance, "-v echo-srv-vol:/tmp/ld-preload")
+	err := dockerRun(srvInstance, "-v echo-srv-vol:/tmp/2veths")
 	if err != nil {
 		t.Errorf("%v", err)
 		return
 	}
 	defer func() { exechelper.Run("docker stop " + srvInstance) }()
 
-	err = dockerRun(clnInstance, "-v echo-cln-vol:/tmp/ld-preload")
+	err = dockerRun(clnInstance, "-v echo-cln-vol:/tmp/2veths")
 	if err != nil {
 		t.Errorf("%v", err)
 		return
@@ -109,13 +153,13 @@ func (s *Veths2Suite) testVclEcho(proto string) {
 	}
 	defer func() { exechelper.Run("docker stop " + echoCln) }()
 
-	_, err = hstfExec("ld-preload srv", srvInstance)
+	_, err = hstfExec("2veths srv", srvInstance)
 	if err != nil {
 		t.Errorf("%v", err)
 		return
 	}
 
-	_, err = hstfExec("ld-preload cln", clnInstance)
+	_, err = hstfExec("2veths cln", clnInstance)
 	if err != nil {
 		t.Errorf("%v", err)
 		return
@@ -174,13 +218,13 @@ func (s *Veths2Suite) TestLDPreloadIperfVpp() {
 	}
 	defer func() { exechelper.Run("docker stop " + clnInstance) }()
 
-	_, err = hstfExec("ld-preload srv", srvInstance)
+	_, err = hstfExec("2veths srv", srvInstance)
 	if err != nil {
 		t.Errorf("%v", err)
 		return
 	}
 
-	_, err = hstfExec("ld-preload cln", clnInstance)
+	_, err = hstfExec("2veths cln", clnInstance)
 	if err != nil {
 		t.Errorf("%v", err)
 		return
@@ -193,7 +237,7 @@ func (s *Veths2Suite) TestLDPreloadIperfVpp() {
 		Append("app-scope-local").
 		Append("app-scope-global").
 		Append("use-mq-eventfd").
-		Append(fmt.Sprintf("app-socket-api /tmp/%s/var/run/app_ns_sockets/2", clnInstance)).Close().
+		Append(fmt.Sprintf("app-socket-api /tmp/%s/2veths/var/run/app_ns_sockets/2", clnInstance)).Close().
 		SaveToFile(clnVcl)
 	if err != nil {
 		t.Errorf("%v", err)
@@ -207,7 +251,7 @@ func (s *Veths2Suite) TestLDPreloadIperfVpp() {
 		Append("app-scope-local").
 		Append("app-scope-global").
 		Append("use-mq-eventfd").
-		Append(fmt.Sprintf("app-socket-api /tmp/%s/var/run/app_ns_sockets/1", srvInstance)).Close().
+		Append(fmt.Sprintf("app-socket-api /tmp/%s/2veths/var/run/app_ns_sockets/1", srvInstance)).Close().
 		SaveToFile(srvVcl)
 	if err != nil {
 		t.Errorf("%v", err)
@@ -275,14 +319,14 @@ func hstfExec(args string, instance string) (string, error) {
 	}
 
 	res, err := waitForSyncFile(syncFile)
-	o := res.StdOutput + res.ErrOutput
 
 	if err != nil {
-		return o, fmt.Errorf("failed to read sync file: %v", err)
-	} else {
-		if res.Code != 0 {
-			return o, fmt.Errorf("cmd resulted in non-zero value %d: %s", res.Code, res.Desc)
-		}
+		return "", fmt.Errorf("failed to read sync file while executing './hstf %s': %v", args, err)
+	}
+
+	o := res.StdOutput + res.ErrOutput
+	if res.Code != 0 {
+		return o, fmt.Errorf("cmd resulted in non-zero value %d: %s", res.Code, res.Desc)
 	}
 	return o, err
 }

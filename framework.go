@@ -13,7 +13,6 @@ import (
 	interfaces "github.com/edwarnicke/govpp/binapi/interface"
 	"github.com/edwarnicke/govpp/binapi/interface_types"
 	ip_types "github.com/edwarnicke/govpp/binapi/ip_types"
-	"github.com/edwarnicke/govpp/binapi/session"
 	"github.com/networkservicemesh/sdk/pkg/tools/log"
 	"github.com/networkservicemesh/sdk/pkg/tools/log/logruslogger"
 )
@@ -75,35 +74,6 @@ func newVppContext() (context.Context, context.CancelFunc) {
 	)
 	ctx = log.WithLog(ctx, logruslogger.New(ctx, map[string]interface{}{"cmd": os.Args[0]}))
 	return ctx, cancel
-}
-
-func configureLDPtest(ifName, interfaceAddress, namespaceId string, secret uint64) ConfFn {
-	return func(ctx context.Context,
-		vppConn api.Connection) error {
-
-		swIfIndex, err := configureAfPacket(ctx, vppConn, ifName, interfaceAddress)
-		if err != nil {
-			log.FromContext(ctx).Fatalf("failed to create af packet: %v", err)
-		}
-		_, er := session.NewServiceClient(vppConn).AppNamespaceAddDelV2(ctx, &session.AppNamespaceAddDelV2{
-			Secret:      secret,
-			SwIfIndex:   swIfIndex,
-			NamespaceID: namespaceId,
-		})
-		if er != nil {
-			log.FromContext(ctx).Fatal("add app namespace ", err)
-			return err
-		}
-
-		_, er1 := session.NewServiceClient(vppConn).SessionEnableDisable(ctx, &session.SessionEnableDisable{
-			IsEnable: true,
-		})
-		if er1 != nil {
-			log.FromContext(ctx).Fatalf("session enable %w", err)
-			return err
-		}
-		return nil
-	}
 }
 
 func Vppcli(runDir, command string) error {

@@ -8,8 +8,8 @@ import (
 	"os"
 
 	"git.fd.io/govpp.git/api"
-	"git.fd.io/govpp.git/binapi/session"
 	"github.com/edwarnicke/exechelper"
+	"github.com/edwarnicke/govpp/binapi/session"
 	"github.com/edwarnicke/vpphelper"
 	"github.com/networkservicemesh/sdk/pkg/tools/log"
 )
@@ -106,6 +106,39 @@ func newResult(err error, desc, outBuf, errBuf string) *SyncResult {
 	}
 }
 
+func okResult() *SyncResult {
+	return newResult(nil, "", "", "")
+}
+
+func configure2vethsTopo(ifName, interfaceAddress, namespaceId string, secret uint64) ConfFn {
+	return func(ctx context.Context,
+		vppConn api.Connection) error {
+
+		swIfIndex, err := configureAfPacket(ctx, vppConn, ifName, interfaceAddress)
+		if err != nil {
+			log.FromContext(ctx).Fatalf("failed to create af packet: %v", err)
+		}
+		_, er := session.NewServiceClient(vppConn).AppNamespaceAddDelV2(ctx, &session.AppNamespaceAddDelV2{
+			Secret:      secret,
+			SwIfIndex:   swIfIndex,
+			NamespaceID: namespaceId,
+		})
+		if er != nil {
+			log.FromContext(ctx).Fatal("add app namespace ", err)
+			return err
+		}
+
+		_, er1 := session.NewServiceClient(vppConn).SessionEnableDisable(ctx, &session.SessionEnableDisable{
+			IsEnable: true,
+		})
+		if er1 != nil {
+			log.FromContext(ctx).Fatalf("session enable %w", err)
+			return err
+		}
+		return nil
+	}
+}
+
 func processArgs() *SyncResult {
 
 	if os.Args[1] == "vpp-proxy" {
@@ -170,9 +203,9 @@ func processArgs() *SyncResult {
 			return newResult(err, "configuration failed", "", "")
 		}
 		Vppcli("", "http tps uri tcp://0.0.0.0/8080")
-		writeSyncFile(newResult(nil, "", "", ""))
+		writeSyncFile(okResult())
 		<-ctx.Done()
-	} else if os.Args[1] == "ld-preload" {
+	} else if os.Args[1] == "2veths" {
 		var startup Stanza
 		startup.
 			NewStanza("session").
@@ -188,15 +221,15 @@ func processArgs() *SyncResult {
 
 		var fn func(context.Context, api.Connection) error
 		if os.Args[2] == "srv" {
-			fn = configureLDPtest("vppsrv", "10.10.10.1/24", "1", 1)
+			fn = configure2vethsTopo("vppsrv", "10.10.10.1/24", "1", 1)
 		} else {
-			fn = configureLDPtest("vppcln", "10.10.10.2/24", "2", 2)
+			fn = configure2vethsTopo("vppcln", "10.10.10.2/24", "2", 2)
 		}
 		err := fn(ctx, con)
 		if err != nil {
 			return newResult(err, "configuration failed", "", "")
 		}
-		writeSyncFile(newResult(nil, "", "", ""))
+		writeSyncFile(okResult())
 		<-ctx.Done()
 	} else if os.Args[1] == "echo-server" {
 		cmd := fmt.Sprintf("vpp_echo json server log=100 socket-name /tmp/echo-srv/var/run/app_ns_sockets/1 use-app-socket-api uri %s://10.10.10.1/12344", os.Args[2])
@@ -206,7 +239,7 @@ func processArgs() *SyncResult {
 			writeSyncFile(newResult(err, "echo_server: ", "", ""))
 		default:
 		}
-		writeSyncFile(newResult(nil, "", "", ""))
+		writeSyncFile(okResult())
 	} else if os.Args[1] == "echo-client" {
 		outBuff := bytes.NewBuffer([]byte{})
 		errBuff := bytes.NewBuffer([]byte{})
@@ -217,6 +250,12 @@ func processArgs() *SyncResult {
 			exechelper.WithStdout(os.Stdout), exechelper.WithStderr(os.Stderr))
 
 		return newResult(err, "", string(outBuff.String()), string(errBuff.String()))
+	} else if os.Args[1] == "echo-srv-internal" {
+		Vppcli("/tmp/2veths", "test echo server uri tcp://10.10.10.1/1234")
+		return okResult()
+	} else if os.Args[1] == "echo-cln-internal" {
+		Vppcli("/tmp/2veths", "test echo client uri tcp://10.10.10.1/1234")
+		return okResult()
 	}
 	return nil
 }
