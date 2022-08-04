@@ -86,13 +86,13 @@ func (s *Veths2Suite) TestEchoBuiltin() {
 		return
 	}
 
-	_, err = hstfExec("echo-srv-internal", srvInstance)
+	_, err = hstfExec("echo-srv-internal private-segment-size 1g fifo-size 4 no-echo", srvInstance)
 	if err != nil {
 		t.Errorf("%v", err)
 		return
 	}
 
-	o, err := hstfExec("echo-cln-internal", clnInstance)
+	o, err := hstfExec("echo-cln-internal nclients 10000 bytes 1 syn-timeout 100 test-timeout 100 no-return private-segment-size 1g fifo-size 4", clnInstance)
 	if err != nil {
 		t.Errorf("%v", err)
 		return

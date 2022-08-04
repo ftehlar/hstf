@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"git.fd.io/govpp.git/api"
 	"github.com/edwarnicke/exechelper"
@@ -255,11 +257,36 @@ func processArgs() *SyncResult {
 
 		return newResult(err, "", string(outBuff.String()), string(errBuff.String()))
 	} else if os.Args[1] == "echo-srv-internal" {
-		o, _ := Vppcli("/tmp/2veths", "test echo server uri tcp://10.10.10.1/1234")
-		return okResultWithStdout(o)
+		cmd := fmt.Sprintf("test echo server %s uri tcp://10.10.10.1/1234", getArgs())
+		o, _ := Vppcli("/tmp/2veths", cmd)
+		return processOutput(o)
 	} else if os.Args[1] == "echo-cln-internal" {
-		o, _ := Vppcli("/tmp/2veths", "test echo client uri tcp://10.10.10.1/1234")
-		return okResultWithStdout(o)
+		cmd := fmt.Sprintf("test echo client %s uri tcp://10.10.10.1.1234", getArgs())
+		o, _ := Vppcli("/tmp/2veths", cmd)
+
+		return processOutput(o)
 	}
 	return nil
+}
+
+func processOutput(s string) *SyncResult {
+	if containsError(s) {
+		return newResult(errors.New("'error' found in string; this might not be a bug"), s, "", "")
+	}
+	return okResultWithStdout(s)
+}
+
+// search string for error detection.
+// this is because we don't have any means for detecting failures of vpp's debug cli commands
+func containsError(s string) bool {
+	return strings.Contains(s, "error") ||
+		strings.Contains(s, "failed")
+}
+
+func getArgs() string {
+	s := ""
+	for i := 2; i < len(os.Args); i++ {
+		s = s + " " + os.Args[i]
+	}
+	return s
 }
