@@ -261,7 +261,7 @@ func processArgs() *SyncResult {
 		o, _ := Vppcli("/tmp/2veths", cmd)
 		return processOutput(o)
 	} else if os.Args[1] == "echo-cln-internal" {
-		cmd := fmt.Sprintf("test echo client %s uri tcp://10.10.10.1.1234", getArgs())
+		cmd := fmt.Sprintf("test echo client %s uri tcp://10.10.10.1/1234", getArgs())
 		o, _ := Vppcli("/tmp/2veths", cmd)
 
 		return processOutput(o)
