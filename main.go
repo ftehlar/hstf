@@ -238,7 +238,7 @@ func processArgs() *SyncResult {
 		writeSyncFile(okResult())
 		<-ctx.Done()
 	} else if os.Args[1] == "echo-server" {
-		cmd := fmt.Sprintf("vpp_echo json server log=100 socket-name /tmp/echo-srv/var/run/app_ns_sockets/1 use-app-socket-api uri %s://10.10.10.1/12344", os.Args[2])
+		cmd := fmt.Sprintf("vpp_echo server log=100 TX=RX socket-name /tmp/echo-srv/var/run/app_ns_sockets/1 use-app-socket-api uri %s://10.10.10.1/12344", os.Args[2])
 		errCh := exechelper.Start(cmd)
 		select {
 		case err := <-errCh:
@@ -275,6 +275,8 @@ func processOutput(s string) *SyncResult {
 	}
 	return okResultWithStdout(s)
 }
+
+// TODO use api cli_inband
 
 // search string for error detection.
 // this is because we don't have any means for detecting failures of vpp's debug cli commands

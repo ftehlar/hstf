@@ -101,7 +101,6 @@ func (s *Veths2Suite) TestEchoBuiltin() {
 }
 
 func (s *Veths2Suite) TestVclEchoQuic() {
-	s.T().Skip("quic echo currently broken in vpp; skipping..")
 	s.testVclEcho("quic")
 }
 
