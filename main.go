@@ -91,7 +91,6 @@ func main() {
 		os.Exit(0)
 	}
 
-	// run vpp + configure
 	var err error
 	res := processArgs()
 	err = writeSyncFile(res)
@@ -277,22 +276,20 @@ func processArgs() *SyncResult {
 			ResultWithStderr(string(errBuff.String())))
 	} else if os.Args[1] == "echo-srv-internal" {
 		cmd := fmt.Sprintf("test echo server %s uri tcp://10.10.10.1/1234", getArgs())
-		ctx, _ := newVppContext()
-		root := "/tmp/2veths"
-		con := vpphelper.DialContext(ctx, filepath.Join(root, "/var/run/vpp/api.sock"))
-		cliInband := vlib.CliInband{Cmd: cmd}
-		cliInbandReply, err := vlib.NewServiceClient(con).CliInband(ctx, &cliInband)
-		return newResult(err, ResultWithStdout(cliInbandReply.Reply))
+		return ApiCliInband("/tmp/2veths", cmd)
 	} else if os.Args[1] == "echo-cln-internal" {
-		ctx, _ := newVppContext()
-		root := "/tmp/2veths"
-		con := vpphelper.DialContext(ctx, filepath.Join(root, "/var/run/vpp/api.sock"))
 		cmd := fmt.Sprintf("test echo client %s uri tcp://10.10.10.1/1234", getArgs())
-		cliInband := vlib.CliInband{Cmd: cmd}
-		cliInbandReply, err := vlib.NewServiceClient(con).CliInband(ctx, &cliInband)
-		return newResult(err, ResultWithStdout(cliInbandReply.Reply))
+		return ApiCliInband("/tmp/2veths", cmd)
 	}
 	return nil
+}
+
+func ApiCliInband(root, cmd string) *SyncResult {
+	ctx, _ := newVppContext()
+	con := vpphelper.DialContext(ctx, filepath.Join(root, "/var/run/vpp/api.sock"))
+	cliInband := vlib.CliInband{Cmd: cmd}
+	cliInbandReply, err := vlib.NewServiceClient(con).CliInband(ctx, &cliInband)
+	return newResult(err, ResultWithStdout(cliInbandReply.Reply))
 }
 
 func getArgs() string {
