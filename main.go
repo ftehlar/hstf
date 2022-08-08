@@ -100,20 +100,38 @@ func main() {
 	}
 }
 
-func newResult(err error, desc, outBuf, errBuf string) *SyncResult {
-	return &SyncResult{
-		Err:       err,
-		StdOutput: outBuf,
-		ErrOutput: errBuf,
+func newResult(err error, opts ...ResultOptionFn) *SyncResult {
+	res := &SyncResult{
+		Err: err,
+	}
+	for _, o := range opts {
+		o(res)
+	}
+	return res
+}
+
+type ResultOptionFn func(res *SyncResult)
+
+func ResultWithDesc(s string) ResultOptionFn {
+	return func(res *SyncResult) {
+		res.Desc = s
 	}
 }
 
-func okResult() *SyncResult {
-	return newResult(nil, "", "", "")
+func ResultWithStderr(s string) ResultOptionFn {
+	return func(res *SyncResult) {
+		res.ErrOutput = s
+	}
 }
 
-func okResultWithStdout(s string) *SyncResult {
-	return newResult(nil, "", s, "")
+func ResultWithStdout(s string) ResultOptionFn {
+	return func(res *SyncResult) {
+		res.ErrOutput = s
+	}
+}
+
+func OkResult() *SyncResult {
+	return newResult(nil)
 }
 
 func configure2vethsTopo(ifName, interfaceAddress, namespaceId string, secret uint64) ConfFn {
@@ -157,9 +175,9 @@ func processArgs() *SyncResult {
 		confFn := configureProxyTcp("vpp0", "10.0.0.2/24", "vpp1", "10.0.1.2/24")
 		err := confFn(ctx, con)
 		if err != nil {
-			return newResult(err, "configuration failed", "", "")
+			return newResult(err, ResultWithDesc("configuration failed"))
 		}
-		writeSyncFile(newResult(nil, "", "", ""))
+		writeSyncFile(OkResult())
 		<-ctx.Done()
 
 	} else if os.Args[1] == "vpp-envoy" {
@@ -181,13 +199,13 @@ func processArgs() *SyncResult {
 		confFn := configureProxyTcp("vpp0", "10.0.0.2/24", "vpp1", "10.0.1.2/24")
 		err := confFn(ctx, con)
 		if err != nil {
-			return newResult(err, "configuration failed", "", "")
+			return newResult(err, ResultWithDesc("configuration failed"))
 		}
 		err0 := exechelper.Run("chmod 777 -R /tmp/vpp-envoy")
 		if err0 != nil {
-			return newResult(err, "setting permissions failed", "", "")
+			return newResult(err, ResultWithDesc("setting permissions failed"))
 		}
-		writeSyncFile(newResult(nil, "", "", ""))
+		writeSyncFile(OkResult())
 		<-ctx.Done()
 	} else if os.Args[1] == "http-tps" {
 		ctx, cancel := newVppContext()
@@ -199,17 +217,17 @@ func processArgs() *SyncResult {
 		confFn := configureProxyTcp("vpp0", "10.0.0.2/24", "vpp1", "10.0.1.2/24")
 		err := confFn(ctx, con)
 		if err != nil {
-			return newResult(err, "configuration failed", "", "")
+			return newResult(err, ResultWithDesc("configuration failed"))
 		}
 
 		_, err = session.NewServiceClient(con).SessionEnableDisable(ctx, &session.SessionEnableDisable{
 			IsEnable: true,
 		})
 		if err != nil {
-			return newResult(err, "configuration failed", "", "")
+			return newResult(err, ResultWithDesc("configuration failed"))
 		}
 		Vppcli("", "http tps uri tcp://0.0.0.0/8080")
-		writeSyncFile(okResult())
+		writeSyncFile(OkResult())
 		<-ctx.Done()
 	} else if os.Args[1] == "2veths" {
 		var startup Stanza
@@ -233,19 +251,19 @@ func processArgs() *SyncResult {
 		}
 		err := fn(ctx, con)
 		if err != nil {
-			return newResult(err, "configuration failed", "", "")
+			return newResult(err, ResultWithDesc("configuration failed"))
 		}
-		writeSyncFile(okResult())
+		writeSyncFile(OkResult())
 		<-ctx.Done()
 	} else if os.Args[1] == "echo-server" {
 		cmd := fmt.Sprintf("vpp_echo server TX=RX socket-name /tmp/echo-srv/var/run/app_ns_sockets/1 use-app-socket-api uri %s://10.10.10.1/12344", os.Args[2])
 		errCh := exechelper.Start(cmd)
 		select {
 		case err := <-errCh:
-			writeSyncFile(newResult(err, "echo_server: ", "", ""))
+			writeSyncFile(newResult(err, ResultWithDesc("echo_server: ")))
 		default:
 		}
-		writeSyncFile(okResult())
+		writeSyncFile(OkResult())
 	} else if os.Args[1] == "echo-client" {
 		outBuff := bytes.NewBuffer([]byte{})
 		errBuff := bytes.NewBuffer([]byte{})
@@ -255,7 +273,8 @@ func processArgs() *SyncResult {
 			exechelper.WithStdout(outBuff), exechelper.WithStderr(errBuff),
 			exechelper.WithStdout(os.Stdout), exechelper.WithStderr(os.Stderr))
 
-		return newResult(err, "", string(outBuff.String()), string(errBuff.String()))
+		return newResult(err, ResultWithStdout(string(outBuff.String())),
+			ResultWithStderr(string(errBuff.String())))
 	} else if os.Args[1] == "echo-srv-internal" {
 		cmd := fmt.Sprintf("test echo server %s uri tcp://10.10.10.1/1234", getArgs())
 		ctx, _ := newVppContext()
@@ -263,7 +282,7 @@ func processArgs() *SyncResult {
 		con := vpphelper.DialContext(ctx, filepath.Join(root, "/var/run/vpp/api.sock"))
 		cliInband := vlib.CliInband{Cmd: cmd}
 		cliInbandReply, err := vlib.NewServiceClient(con).CliInband(ctx, &cliInband)
-		return newResult(err, "", cliInbandReply.Reply, "")
+		return newResult(err, ResultWithStdout(cliInbandReply.Reply))
 	} else if os.Args[1] == "echo-cln-internal" {
 		ctx, _ := newVppContext()
 		root := "/tmp/2veths"
@@ -271,7 +290,7 @@ func processArgs() *SyncResult {
 		cmd := fmt.Sprintf("test echo client %s uri tcp://10.10.10.1/1234", getArgs())
 		cliInband := vlib.CliInband{Cmd: cmd}
 		cliInbandReply, err := vlib.NewServiceClient(con).CliInband(ctx, &cliInband)
-		return newResult(err, "", cliInbandReply.Reply, "")
+		return newResult(err, ResultWithStdout(cliInbandReply.Reply))
 	}
 	return nil
 }
