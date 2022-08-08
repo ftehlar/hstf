@@ -4,14 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
-	"strings"
+	"path/filepath"
 
 	"git.fd.io/govpp.git/api"
 	"github.com/edwarnicke/exechelper"
 	"github.com/edwarnicke/govpp/binapi/session"
+	"github.com/edwarnicke/govpp/binapi/vlib"
 	"github.com/edwarnicke/vpphelper"
 	"github.com/networkservicemesh/sdk/pkg/tools/log"
 )
@@ -238,7 +238,7 @@ func processArgs() *SyncResult {
 		writeSyncFile(okResult())
 		<-ctx.Done()
 	} else if os.Args[1] == "echo-server" {
-		cmd := fmt.Sprintf("vpp_echo server log=100 TX=RX socket-name /tmp/echo-srv/var/run/app_ns_sockets/1 use-app-socket-api uri %s://10.10.10.1/12344", os.Args[2])
+		cmd := fmt.Sprintf("vpp_echo server TX=RX socket-name /tmp/echo-srv/var/run/app_ns_sockets/1 use-app-socket-api uri %s://10.10.10.1/12344", os.Args[2])
 		errCh := exechelper.Start(cmd)
 		select {
 		case err := <-errCh:
@@ -250,7 +250,7 @@ func processArgs() *SyncResult {
 		outBuff := bytes.NewBuffer([]byte{})
 		errBuff := bytes.NewBuffer([]byte{})
 
-		cmd := fmt.Sprintf("vpp_echo client log=100 socket-name /tmp/echo-cln/var/run/app_ns_sockets/2 use-app-socket-api uri %s://10.10.10.1/12344", os.Args[2])
+		cmd := fmt.Sprintf("vpp_echo client socket-name /tmp/echo-cln/var/run/app_ns_sockets/2 use-app-socket-api uri %s://10.10.10.1/12344", os.Args[2])
 		err := exechelper.Run(cmd,
 			exechelper.WithStdout(outBuff), exechelper.WithStderr(errBuff),
 			exechelper.WithStdout(os.Stdout), exechelper.WithStderr(os.Stderr))
@@ -258,31 +258,22 @@ func processArgs() *SyncResult {
 		return newResult(err, "", string(outBuff.String()), string(errBuff.String()))
 	} else if os.Args[1] == "echo-srv-internal" {
 		cmd := fmt.Sprintf("test echo server %s uri tcp://10.10.10.1/1234", getArgs())
-		o, _ := Vppcli("/tmp/2veths", cmd)
-		return processOutput(o)
+		ctx, _ := newVppContext()
+		root := "/tmp/2veths"
+		con := vpphelper.DialContext(ctx, filepath.Join(root, "/var/run/vpp/api.sock"))
+		cliInband := vlib.CliInband{Cmd: cmd}
+		cliInbandReply, err := vlib.NewServiceClient(con).CliInband(ctx, &cliInband)
+		return newResult(err, "", cliInbandReply.Reply, "")
 	} else if os.Args[1] == "echo-cln-internal" {
+		ctx, _ := newVppContext()
+		root := "/tmp/2veths"
+		con := vpphelper.DialContext(ctx, filepath.Join(root, "/var/run/vpp/api.sock"))
 		cmd := fmt.Sprintf("test echo client %s uri tcp://10.10.10.1/1234", getArgs())
-		o, _ := Vppcli("/tmp/2veths", cmd)
-
-		return processOutput(o)
+		cliInband := vlib.CliInband{Cmd: cmd}
+		cliInbandReply, err := vlib.NewServiceClient(con).CliInband(ctx, &cliInband)
+		return newResult(err, "", cliInbandReply.Reply, "")
 	}
 	return nil
-}
-
-func processOutput(s string) *SyncResult {
-	if containsError(s) {
-		return newResult(errors.New("'error' found in string; this might not be a bug"), s, "", "")
-	}
-	return okResultWithStdout(s)
-}
-
-// TODO use api cli_inband
-
-// search string for error detection.
-// this is because we don't have any means for detecting failures of vpp's debug cli commands
-func containsError(s string) bool {
-	return strings.Contains(s, "error") ||
-		strings.Contains(s, "failed")
 }
 
 func getArgs() string {
